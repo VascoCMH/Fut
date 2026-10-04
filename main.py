@@ -8,10 +8,11 @@ def main():
     #do something with the frames
     tracker = Tracker("modelo/best.pt")
     tracks = tracker.get_tracks(frames)
-    print(tracks)
+    drawn_frames = tracker.draw_annotations(frames, tracks)
+
     #save the video
     output_path="output_videos/outputvideo.mp4"
-    save_video(frames, output_path, fps)
+    save_video(drawn_frames, output_path, fps)
 
 if __name__ == "__main__":
     main()
