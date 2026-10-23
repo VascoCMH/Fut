@@ -6,7 +6,7 @@ def main():
 
     fps, frames=read_video(video_path)
     #do something with the frames
-    tracker = Tracker("modelo/best.pt")
+    tracker = Tracker("modelo/player.pt")
     tracks = tracker.get_tracks(frames)
     drawn_frames = tracker.draw_annotations(frames, tracks)
 
