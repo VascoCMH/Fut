@@ -9,10 +9,60 @@ from .football_pitch import FootballPitch
 class Homography:
     """Calibra uma imagem com os keypoints do campo (IDs de 1 a 32)."""
 
-    def __init__(self, pitch=None):
+    def __init__(self, pitch=None, model_path="modelo/pitch.pt"):
         self.pitch = pitch if pitch is not None else FootballPitch()
+        self.model_path = model_path
+        self.model = None
         self.matrix = None
         self.inlier_ids = []
+
+    def get_matrix(self, frame):
+        """Deteta os keypoints do frame e devolve a matriz píxeis -> metros.
+
+        O modelo é carregado na primeira chamada e reutilizado nas seguintes.
+        Lança ValueError se não for possível calibrar este frame.
+        """
+        self.matrix = None
+        self.inlier_ids = []
+        if self.model is None:
+            from ultralytics import YOLO
+
+            self.model = YOLO(self.model_path)
+        result = self.model.predict(frame, verbose=False)[0]
+        self.fit_yolo(result)
+        return self.matrix.copy()
+
+    @staticmethod
+    def update_tracks(matrix, tracks):
+        """Atualiza e devolve as tracks de UM frame, preservando IDs e dados.
+
+        Formato: {categoria: {track_id: {"bbox": [x1, y1, x2, y2], ...}}}.
+        Acrescenta feet_px e position_m a cada objeto, no próprio dicionário.
+        matrix=None limpa position_m, evitando reutilizar posições anteriores.
+        """
+        if matrix is not None:
+            matrix = np.asarray(matrix, dtype=np.float64)
+            if (matrix.shape != (3, 3) or not np.isfinite(matrix).all()
+                    or np.linalg.matrix_rank(matrix) < 3):
+                raise ValueError("A matriz deve ser 3 × 3, finita e invertível.")
+        for objects in tracks.values():
+            for track in objects.values():
+                bbox = np.asarray(track["bbox"], dtype=np.float64)
+                if bbox.shape != (4,) or not np.isfinite(bbox).all():
+                    raise ValueError("Cada bbox deve conter quatro valores finitos.")
+                x1, _, x2, y2 = bbox
+                feet = [float((x1 + x2) / 2), float(y2)]
+                track["feet_px"] = feet
+                track["position_m"] = None
+                if matrix is None:
+                    continue
+                projected = matrix @ np.array([*feet, 1.0])
+                if not np.isfinite(projected).all() or np.isclose(projected[2], 0):
+                    continue
+                position = projected[:2] / projected[2]
+                if np.isfinite(position).all():
+                    track["position_m"] = position.tolist()
+        return tracks
 
     def fit(self, image_keypoints, ransac_threshold=5.0):
         """Recebe {ID: (x_px, y_px)}; o limiar RANSAC é em píxeis.

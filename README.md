@@ -85,6 +85,36 @@ consoante estejam mais perto ou mais longe da câmara.
 
 ### Usar com jogadores
 
+As duas operações principais da classe são `get_matrix(frame)` e
+`update_tracks(matrix, tracks_do_frame)`:
+
+```python
+from homografia import Homography
+
+homography = Homography(model_path="modelo/pitch.pt")  # Criar uma vez.
+
+for frame_index, frame in enumerate(frames):
+    try:
+        matrix = homography.get_matrix(frame)
+    except ValueError:
+        matrix = None
+    frame_tracks = {
+        category: tracks_by_frame[frame_index]
+        for category, tracks_by_frame in tracks.items()
+    }
+    updated_tracks = homography.update_tracks(matrix, frame_tracks)
+```
+
+`tracks` é o resultado de `Tracker.get_tracks(frames)`. A segunda operação
+recebe as tracks de **um frame** por categoria e ID; acrescenta `feet_px` e
+`position_m` no próprio dicionário e devolve-o, preservando IDs e os restantes
+dados. Como os objetos são os mesmos, a lista original `tracks` também fica
+atualizada. Se a matriz for `None`, as posições em metros ficam a `None`.
+Não há desenho nem tracking dentro destas duas operações.
+
+Para testar manualmente um conjunto de pontos, os métodos auxiliares
+`fit_yolo`, `fit` e `transform_points` continuam disponíveis:
+
 ```python
 from ultralytics import YOLO
 from homografia import Homography

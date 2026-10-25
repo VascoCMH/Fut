@@ -6,9 +6,7 @@ from pathlib import Path
 from time import perf_counter
 
 import cv2
-import numpy as np
 import torch
-from ultralytics import YOLO
 
 from homografia import Homography
 from homografia.minimap import PitchMinimap
@@ -71,36 +69,27 @@ def track_video(source, model_path):
 
 def project_video(source, model_path, records):
     """Passagem 2: detetar o campo e acrescentar posições em metros à lista."""
-    model = YOLO(model_path)
-    homography = Homography()
+    homography = Homography(model_path=model_path)
     count = 0
     for index, frame in enumerate(read_frames(source)):
         if index >= len(records):
             raise RuntimeError("O número de frames mudou entre passagens.")
         record = records[index]
-        result = model.predict(frame, verbose=False)[0]
+        matrix = None
         try:
-            homography.fit_yolo(result)
+            matrix = homography.get_matrix(frame)
         except ValueError as error:
             record["calibration_error"] = str(error)
         else:
             record["calibration_error"] = None
         record["homography"] = (
-            homography.matrix.tolist() if homography.matrix is not None else None
+            matrix.tolist() if matrix is not None else None
         )
         record["inlier_ids"] = list(map(int, homography.inlier_ids))
-        for player in record["players"]:
-            x1, _, x2, y2 = player["bbox"]
-            feet = [(x1 + x2) / 2, y2]
-            player["feet_px"] = feet
-            player["position_m"] = None
-            if homography.matrix is not None:
-                try:
-                    position = homography.transform_points([feet])[0]
-                except ValueError:
-                    continue
-                if np.isfinite(position).all():
-                    player["position_m"] = position.tolist()
+        frame_tracks = {
+            "players": {player["track_id"]: player for player in record["players"]}
+        }
+        homography.update_tracks(matrix, frame_tracks)
         count += 1
         if count % 100 == 0:
             print(f"Homografia e posições: {count}/{len(records)} frames.", flush=True)
