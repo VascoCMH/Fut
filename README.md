@@ -6,7 +6,7 @@ A homografia converte uma posição na imagem, em píxeis, numa posição no
 plano do campo, em metros. A implementação está em `homografia/homografia.py`.
 
 Para executar a calibração de um vídeo, num ambiente Python com
-`ultralytics`, `opencv-python` e `numpy` instalados:
+`ultralytics`, `supervision`, `opencv-python` e `numpy` instalados:
 
 ```sh
 python yolo_inference.py
@@ -21,9 +21,31 @@ minimapa no canto inferior direito. Podes escolher outro vídeo ou destino:
 python yolo_inference.py --source input_videos/inputvideo1.mp4 --output output_videos/minimap.mp4
 ```
 
+O processamento é dividido em fases completas:
+
+1. Analisar todo o vídeo com o `Tracker` existente (YOLO + ByteTrack),
+   guardando as bounding boxes e IDs por frame. A mesma instância do tracker
+   mantém o estado entre lotes de 32 imagens.
+2. Voltar a percorrer o vídeo, detetar o campo, calcular uma homografia por
+   frame e projetar os pés dos jogadores identificados na primeira fase.
+3. Guardar a lista completa em JSON, por defeito
+   `output_videos/pitch_homography.json`. Cada frame contém os jogadores com
+   `track_id`, `bbox`, `feet_px` e `position_m`, além da homografia e estado
+   da calibração. As posições são em metros; ficam a `null` quando não é
+   possível projetar. `frame_index` começa em zero.
+4. Percorrer o vídeo novamente e desenhar apenas com os dados dessa lista,
+   sem executar modelos de deteção ou tracking.
+
+O terminal mostra a hora de conclusão em UTC e a duração de cada fase.
+As imagens são lidas em lotes ou uma a uma; apenas os dados dos resultados
+ficam em memória para todo o vídeo. Usa `--positions caminho.json` para
+escolher o destino da lista. O JSON também regista FPS e dimensões do campo.
+
 O minimapa projeta o centro inferior de cada bounding box (os pés) para o
-campo. Os números amarelos correspondem aos jogadores no mesmo frame do
-vídeo; não são IDs persistentes de tracking nem cores de equipa. Compara as
+campo. Os números amarelos são os IDs atribuídos pelo ByteTrack, iguais no
+vídeo e no mapa. O tracker pode perder uma identidade após oclusões longas
+ou cortes de câmara; não é reconhecimento da identidade real do jogador.
+As cores não representam equipas. Compara as
 posições com as linhas reais: um jogador junto ao meio-campo deve aparecer
 junto à linha central no mapa. Saltos ou deslocamentos incoerentes podem
 indicar erros na calibração ou na deteção dos pés. Isto permite uma inspeção
@@ -92,5 +114,5 @@ posições de referência para o campo/dataset que estás a usar.
 Usa a posição dos pés porque a transformação só é válida para o plano do
 relvado. O centro do corpo ou uma bola no ar não pertencem a esse plano.
 Recalibra para cada imagem quando houver movimento ou zoom da câmara.
-O script de vídeo recalibra em cada frame e projeta as deteções desse mesmo
-frame; a integração com IDs persistentes do tracker ainda não está incluída.
+O script de vídeo recalibra em cada frame e projeta as posições dos jogadores
+com tracking calculadas para esse mesmo frame.

@@ -11,7 +11,7 @@ class PitchMinimap:
         self.width = pitch.width / 100
 
     def overlay(self, frame, players, calibrated):
-        """players contém pares (número no frame, posição em metros).
+        """players contém pares (ID de tracking, posição em metros).
 
         Pontos fora do campo são contados, sem os prender às linhas do campo.
         """
