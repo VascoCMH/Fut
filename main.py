@@ -16,14 +16,16 @@ def main():
     homography = Homography(model_path="modelo/pitch.pt")
     calibrated_frames = []
     previous_frame = None
+    matrix = None
     for frame_index, frame in enumerate(frames):
-        if camera_moved(previous_frame, frame):
+        if matrix is None or camera_moved(previous_frame, frame):
             try:
                 matrix = homography.get_matrix(frame)
+                previous_frame = frame
             except ValueError as error:
                 print(f"Frame {frame_index + 1}: {error}")
                 matrix = None
-            calibrated_frames.append(matrix is not None)
+        calibrated_frames.append(matrix is not None)
 
         frame_tracks = {
             category: category_tracks[frame_index]
