@@ -42,7 +42,9 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 
 ## Estado atual
 - Feito: classificação por cor validada visualmente nos primeiros 150 frames
-  do vídeo de teste (10 brancos, 10 verde-lima, árbitros e guarda-redes certos).
+  do vídeo de teste (10 brancos, 10 verde-lima, árbitros e guarda-redes certos)
+  e pelo Vasco no vídeo completo, com homografia, no computador dele (sem venv,
+  com os pacotes instalados globalmente).
 - Por fazer / ideias:
   - Melhorar o modelo: mais dados (Roboflow Universe e frames próprios),
     `imgsz=1280`, ou retreinar só com 2 classes (`person`, `ball`).
@@ -54,4 +56,5 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 ## Registo de sessões
 - 2026-11-16: classificação de equipas, guarda-redes e árbitros
   (`team_assigner/`); classes de pessoa fundidas no tracker; minimapa com
-  cores; criado este ficheiro.
+  cores; criado este ficheiro. Validado localmente no vídeo completo;
+  PR VascoCMH/Fut#1 para o main.
