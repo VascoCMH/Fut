@@ -13,8 +13,9 @@ Etapas:
    valores afastados.
 4. Cada track recebe a equipa mais votada nas suas amostras; se a maioria das
    amostras for afastada das duas equipas, fica como "outro".
-5. Os "outros" que estão perto de uma baliza são guarda-redes (da equipa que
-   defende esse lado); os restantes são árbitros.
+5. Os "outros" que são quase sempre a pessoa mais recuada do campo (e não
+   estão junto à linha lateral) são guarda-redes, da equipa que está mais
+   perto deles; os restantes são árbitros.
 """
 
 from collections import Counter, defaultdict
@@ -180,8 +181,11 @@ class TeamAssigner:
                     self.centers[t] = self._weighted_median(data[members],
                                                             weights[members])
 
-        # Ordem estável: equipa A é a camisola mais clara.
-        order = np.argsort(-self.centers[:, 0])
+        # Ordem estável: ordenar pelo canal (L, a ou b) em que as duas cores
+        # mais diferem; ordenar sempre por L troca as equipas quando ambas as
+        # camisolas são claras (p. ex. branco e verde-lima).
+        channel = np.argmax(np.abs(self.centers[0] - self.centers[1]) * LAB_WEIGHTS)
+        order = np.argsort(-self.centers[:, channel])
         self.centers = self.centers[order]
         for team, center in enumerate(self.centers):
             lab = np.clip(center, 0, 255).astype(np.uint8).reshape(1, 1, 3)
@@ -245,21 +249,46 @@ class TeamAssigner:
                 votes[min(means, key=lambda t: abs(means[t] - gk_x))] += 1
         return votes.most_common(1)[0][0] if votes else None
 
+    def _deepest_share(self, player_tracks, track_id, team_of, min_players=6,
+                       min_fraction=0.9):
+        """Fração dos frames em que esta pessoa é a mais recuada do campo, i.e.
+        tem pelo menos `min_fraction` dos jogadores de campo do mesmo lado.
+
+        Um guarda-redes está quase sempre atrás de todos; um árbitro, no meio.
+        Não depende de uma distância fixa à baliza (o guarda-redes pode subir
+        quando a equipa ataca). Usa metros se houver homografia, senão píxeis.
+        """
+        deepest = total = 0
+        for frame in player_tracks:
+            if track_id not in frame:
+                continue
+            use_metres = frame[track_id].get("position_m") is not None
+            x = self._x(frame[track_id], use_metres)
+            others = [
+                self._x(p, use_metres) for tid, p in frame.items()
+                if tid in team_of and tid != track_id
+            ]
+            others = np.array([o for o in others if o is not None])
+            if x is None or len(others) < min_players:
+                continue
+            total += 1
+            behind = max(np.mean(others > x), np.mean(others < x))
+            deepest += behind >= min_fraction
+        return deepest / total if total else 0.0
+
     def _resolve_others(self, player_tracks, others, team_of, yolo_hints, pitch):
         """Separa os 'outros' em guarda-redes (com equipa) e árbitros."""
-        length = pitch.length / 100 if pitch is not None else 120.0
         width = pitch.width / 100 if pitch is not None else 70.0
         roles = {}
         for track_id in others:
             position = self._median_position(player_tracks, track_id)
             hint = yolo_hints.get(track_id, Counter())
-            near_goal = (
-                position is not None
-                and (position[0] < 20 or position[0] > length - 20)
-                and abs(position[1] - width / 2) < 22
-            )
             hint_gk = hint["goalkeeper"] > hint["referee"]
-            if not (near_goal or (position is None and hint_gk)):
+            share = self._deepest_share(player_tracks, track_id, team_of)
+            # Fiscais de linha também podem estar recuados, mas junto à linha.
+            central = position is None or abs(position[1] - width / 2) < 25
+            is_goalkeeper = central and (share >= 0.6 or (hint_gk and share >= 0.3))
+            if not is_goalkeeper:
                 roles[track_id] = ("referee", None)
                 continue
             roles[track_id] = (

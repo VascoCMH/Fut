@@ -3,13 +3,14 @@ from trackers import Tracker
 from homografia import Homography
 from homografia.minimap import PitchMinimap
 from team_assigner import TeamAssigner
+from reid import ReIdentifier, summarize
 def main():
     #read the video
     video_path="input_videos/inputvideo.mp4"
 
     fps, frames=read_video(video_path)
     #do something with the frames
-    tracker = Tracker("modelo/player.pt")
+    tracker = Tracker("modelo/player.pt", fps=fps)
     tracks = tracker.get_tracks(frames)
 
 
@@ -38,13 +39,19 @@ def main():
     team_assigner = TeamAssigner()
     team_assigner.assign(frames, tracks, homography.pitch)
 
+    ##REID (Une tracks da mesma pessoa que desapareceu e voltou)###
+    reidentifier = ReIdentifier(fps=fps)
+    reidentifier.assign(tracks)
+    print("\n".join(summarize(reidentifier)))
+
     drawn_frames = tracker.draw_annotations(frames, tracks)
 
     ##MINIMAP (Desenha a posição dos jogadores no campo)###
     minimap = PitchMinimap(homography.pitch)
     for frame_index, frame in enumerate(drawn_frames):
         people = [
-            (track_id, person["position_m"], person.get("team_color", (0, 220, 255)))
+            (person.get("global_id", track_id), person["position_m"],
+             person.get("team_color", (0, 220, 255)))
             for category in ("players", "referees")
             for track_id, person in tracks[category][frame_index].items()
             if person["position_m"] is not None

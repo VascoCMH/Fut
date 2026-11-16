@@ -5,9 +5,16 @@ import supervision as sv
 from utils import get_center_of_bbox, get_bbox_width
 
 class Tracker:
-    def __init__(self, model_path):
+    def __init__(self, model_path, fps=25, lost_track_buffer=100):
+        """lost_track_buffer: nº de frames durante os quais o ByteTrack se
+        lembra de uma pessoa perdida (100 frames = 4 s a 25 fps). O valor por
+        omissão do ByteTrack (30) só cobre oclusões de ~1 s.
+        """
         self.model = YOLO(model_path)
-        self.tracker = sv.ByteTrack()
+        self.tracker = sv.ByteTrack(
+            lost_track_buffer=lost_track_buffer,
+            frame_rate=int(round(fps)) if fps else 25,
+        )
 
     def detect_track(self, frames):
         results=[]
@@ -92,7 +99,8 @@ class Tracker:
             # Draw Players
             for track_id, player in player_dict.items():
                 color = player.get("team_color",(0,0,255))
-                frame = self.draw_ellipse(frame, player["bbox"],color, track_id)
+                label = player.get("global_id", track_id)
+                frame = self.draw_ellipse(frame, player["bbox"], color, label)
 
             # Draw referees
             for track_id, referee in referee_dict.items():
@@ -109,20 +117,25 @@ class Tracker:
 
     
     def get_tracks(self, frames):
-        detections = self.detect_track(frames)
+        results = self.detect_track(frames)
+        detections = [sv.Detections.from_ultralytics(r) for r in results]
+        names = results[0].names if results else {}
+        return self.tracks_from_detections(detections, names)
 
+    def tracks_from_detections(self, detections, cls_names):
+        """Tracking a partir de deteções já calculadas (sv.Detections por frame).
+
+        Separado da deteção para poder repetir o tracking com outros
+        parâmetros sem voltar a correr o YOLO.
+        """
+        cls_names_inv = {v: k for k, v in cls_names.items()}
         tracks={
             "players":[],
             "referees":[],
             "ball":[]
         }
 
-        for frame_num, detection in enumerate(detections):
-            cls_names = detection.names
-            cls_names_inv = {v:k for k,v in cls_names.items()}
-
-            # Covert to supervision Detection format
-            detection_supervision = sv.Detections.from_ultralytics(detection)
+        for frame_num, detection_supervision in enumerate(detections):
 
             # Juntar jogador, guarda-redes e árbitro numa só classe "pessoa".
             # As classes do modelo ainda não são fiáveis; a distinção é feita
@@ -135,6 +148,14 @@ class Tracker:
             for object_ind, class_name in enumerate(yolo_classes):
                 if class_name in person_classes:
                     detection_supervision.class_id[object_ind] = cls_names_inv["player"]
+
+            # O NMS do YOLO é feito por classe: a mesma pessoa pode vir em duas
+            # caixas (p. ex. "player" e "goalkeeper"). Depois de fundir as
+            # classes, eliminar esses duplicados para não criar tracks duplas.
+            if len(detection_supervision) > 0:
+                detection_supervision = detection_supervision.with_nms(
+                    threshold=0.7, class_agnostic=False
+                )
 
             # Track Objects
             detection_with_tracks = self.tracker.update_with_detections(detection_supervision)

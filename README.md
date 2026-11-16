@@ -55,11 +55,11 @@ Esta abordagem facilita o acesso às imagens nas várias etapas, mas o consumo d
 
 O `Tracker`, em `trackers/tracker.py`, carrega `modelo/player.pt` e executa a deteção em lotes de **32 frames**, com um limiar de confiança de **0,1**.
 
-Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, as classes `player`, `goalkeeper` e `referee` são fundidas numa só classe de pessoa. As classes do modelo atual ainda não são fiáveis, e a fusão evita que um ID mude quando a classe oscila entre frames. A classe original fica guardada em `yolo_class`, apenas como pista.
+Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, as classes `player`, `goalkeeper` e `referee` são fundidas numa só classe de pessoa. As classes do modelo atual ainda não são fiáveis, e a fusão evita que um ID mude quando a classe oscila entre frames. A classe original fica guardada em `yolo_class`, apenas como pista. Como o NMS do YOLO é feito por classe, a mesma pessoa pode vir em duas caixas (por exemplo `player` e `goalkeeper`); depois da fusão aplica-se um segundo NMS (IoU 0,7) para eliminar esses duplicados.
 
 ### 3. Tracking entre frames
 
-O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado.
+O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado. O tracker usa os FPS do vídeo e lembra-se de uma pessoa perdida durante 100 frames (`lost_track_buffer`, 4 s a 25 fps). Desaparecimentos mais longos são tratados pelo ReID (secção 6.2).
 
 Os resultados são organizados por categoria, frame e ID:
 
@@ -132,9 +132,21 @@ O resultado é uma posição `(x, y)` em metros, com origem no ponto de referên
 3. Calcula a cor mediana em LAB, dando menos peso à luminosidade para tolerar sombras.
 4. Agrupa as cores das tracks com KMeans (k=4). As duas equipas são os dois grupos com mais amostras e cores distintas; os centros são depois afinados sem os valores afastados.
 5. Cada track recebe a equipa mais votada nas suas amostras. Se a maioria estiver longe das duas equipas, a track é um "outro".
-6. Um "outro" junto a uma baliza (ou, sem homografia, marcado como `goalkeeper` pelo YOLO na maioria dos frames) é guarda-redes. A equipa é a que está, em média, mais perto dele frame a frame. Os restantes são árbitros e passam para `tracks["referees"]`.
+6. Um "outro" que é quase sempre a pessoa mais recuada do campo (atrás de pelo menos 90 % dos jogadores de campo em 60 % dos frames, ou em 30 % se o YOLO o marcar como `goalkeeper`) e não está junto à linha lateral é guarda-redes. Não se usa uma distância fixa à baliza, porque o guarda-redes sobe quando a equipa ataca. A equipa é a que está, em média, mais perto dele frame a frame. Os restantes são árbitros e passam para `tracks["referees"]`.
 
-Cada jogador fica com `team` (0 ou 1), `role` (`player`, `goalkeeper` ou `referee`) e `team_color` (a cor real da camisola, em BGR).
+Cada jogador fica com `team` (0 ou 1), `role` (`player`, `goalkeeper` ou `referee`) e `team_color` (a cor real da camisola, em BGR). A numeração das equipas é estável: segue o canal de cor (L, a ou b) em que as duas camisolas mais diferem.
+
+### 6.2. Reidentificação (ReID)
+
+Quando um jogador desaparece (oclusão ou saída de imagem) e volta, o ByteTrack dá-lhe um ID novo. `ReIdentifier`, em `reid/reid.py`, corre depois do `TeamAssigner` e junta essas tracks em cadeias, cada uma com um `global_id`:
+
+1. Constrói uma vista por track (`reid/tracklets.py`): primeiro e último frame, posições inicial e final em metros (mediana de 5 amostras) e a velocidade de saída (regressão linear nas últimas 10 posições, limitada a 8 m/s).
+2. Um par "A acaba → B começa" só é possível se as tracks forem da **mesma equipa e do mesmo papel**, se **B começar depois de A** (nunca coexistem) até 10 s depois, e se a **distância for fisicamente possível**: `|início(B) − previsão(A)| ≤ 2 m + 8 m/s × intervalo`. A previsão usa a velocidade de saída durante, no máximo, 1 s. Por usar metros, funciona com a câmara em movimento.
+3. Guarda-redes: sem limite de tempo, porque só há um por equipa.
+4. Sem homografia, só se aceitam intervalos até 1 s, com a distância em píxeis.
+5. As ligações são escolhidas em conjunto com o algoritmo húngaro (`scipy.optimize.linear_sum_assignment`). Uma ligação é rejeitada se houver outro candidato quase tão bom: é preferível um ID novo a trocar dois jogadores.
+
+O vídeo e o minimapa mostram o `global_id`; o ID do ByteTrack mantém-se como chave em `tracks`. No fim, o terminal apresenta um resumo por grupo (tracks, identidades e ligações). No vídeo de teste, o resultado é de 10 + 10 jogadores de campo, 1 + 1 guarda-redes e 3 árbitros.
 
 Os pés aproximam um ponto no plano do relvado, condição necessária para esta transformação. O centro do corpo ou uma bola no ar não pertencem a esse plano, pelo que a sua projeção não representa corretamente a posição no solo.
 
@@ -189,7 +201,7 @@ Quando não é possível projetar um jogador, `position_m` fica a `null`. O term
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install ultralytics "supervision<0.27" opencv-python numpy torch
+python -m pip install ultralytics "supervision<0.27" opencv-python numpy scipy torch
 ```
 
 ### Preparar os ficheiros
@@ -245,6 +257,12 @@ FutTrack/
 │   └── minimap.py             # Desenho do campo e posições projetadas
 ├── team_assigner/
 │   └── team_assigner.py       # Equipas, guarda-redes e árbitros pela cor
+├── reid/
+│   ├── tracklets.py           # Vista por track (início, fim, posições, velocidade)
+│   ├── reid.py                # Ligação de tracks da mesma pessoa (global_id)
+│   └── diagnostics.py         # Resumo de tracks e identidades por grupo
+├── tests/
+│   └── test_reid.py           # Testes sintéticos do ReID (python -m pytest tests/)
 ├── utils/
 │   ├── video_utils.py         # Leitura, escrita e deteção de movimento
 │   └── bbox_utils.py          # Operações auxiliares sobre bounding boxes
@@ -271,7 +289,7 @@ O dataset incluído identifica como origem o Football Players Detection, no Robo
 
 ## Limitações e próximos passos
 
-Os IDs representam trajetórias temporais, não a identidade real dos jogadores. Oclusões prolongadas, saídas de imagem e cortes de câmara podem causar perda ou troca de IDs.
+O `global_id` representa uma pessoa ao longo do vídeo, não a sua identidade real (nome ou número). O ReID usa apenas equipa, papel, tempo e posição: falha quando um jogador fica mais de 10 s fora de imagem, em cortes de câmara (repetições, grandes planos) e quando vários colegas desaparecem juntos no mesmo sítio (casos que deixa por ligar). Os próximos passos são acrescentar aparência (um modelo de ReID como o OSNet) e o número da camisola.
 
 A precisão depende da deteção dos pés, da qualidade e distribuição dos keypoints e da correspondência entre o campo real e o modelo geométrico. A inspeção do minimapa ajuda a identificar erros visuais, mas não substitui uma avaliação quantitativa. Este README não apresenta resultados validados de precisão em metros, qualidade de tracking ou velocidade de processamento.
 
