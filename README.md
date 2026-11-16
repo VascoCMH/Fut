@@ -8,8 +8,9 @@ O projeto explora a ligação entre **deep learning, tracking de múltiplos obje
 
 ## Funcionalidades implementadas
 
-- Deteção de jogadores, guarda-redes, árbitros e bola no módulo `Tracker`.
-- Tracking de jogadores e árbitros com ByteTrack; os guarda-redes são integrados na categoria de jogadores.
+- Deteção de pessoas e bola no módulo `Tracker`; jogadores, guarda-redes e árbitros são fundidos numa só classe antes do tracking.
+- Tracking de todas as pessoas com ByteTrack.
+- Classificação em equipa A, equipa B, guarda-redes e árbitros pela cor da camisola e pela posição (`TeamAssigner`).
 - Deteção de 32 pontos de referência do campo e estimação de homografia com RANSAC.
 - Projeção dos pés dos jogadores para coordenadas em metros.
 - Verificação de movimento da câmara para decidir quando recalibrar no `main.py`.
@@ -39,7 +40,8 @@ flowchart TD
     D --> E[Verificação de movimento da câmara]
     E --> F[Calibração ou reutilização da homografia]
     F --> G[Projeção dos pés para metros]
-    G --> H[Anotações e minimapa]
+    G --> T[Equipas, guarda-redes e árbitros pela cor]
+    T --> H[Anotações e minimapa]
     H --> I[Vídeo MP4 de saída]
 ```
 
@@ -53,11 +55,11 @@ Esta abordagem facilita o acesso às imagens nas várias etapas, mas o consumo d
 
 O `Tracker`, em `trackers/tracker.py`, carrega `modelo/player.pt` e executa a deteção em lotes de **32 frames**, com um limiar de confiança de **0,1**.
 
-Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, a classe `goalkeeper` é convertida para `player`, permitindo acompanhar jogadores de campo e guarda-redes na mesma categoria.
+Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, as classes `player`, `goalkeeper` e `referee` são fundidas numa só classe de pessoa. As classes do modelo atual ainda não são fiáveis, e a fusão evita que um ID mude quando a classe oscila entre frames. A classe original fica guardada em `yolo_class`, apenas como pista.
 
 ### 3. Tracking entre frames
 
-O ByteTrack associa as deteções ao longo do vídeo e atribui IDs aos jogadores e árbitros. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado.
+O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado.
 
 Os resultados são organizados por categoria, frame e ID:
 
@@ -68,7 +70,7 @@ tracks
 └── ball     → lista de frames → deteção da bola
 ```
 
-A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. No desenho do `main.py`, os jogadores recebem elipses e IDs, e a bola é assinalada com um triângulo. Os árbitros são guardados nas tracks, mas não são desenhados pela implementação atual.
+A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. No desenho do `main.py`, os jogadores recebem elipses e IDs com a cor da equipa, os árbitros recebem elipses amarelas e a bola é assinalada com um triângulo. A lista `referees` é preenchida pelo `TeamAssigner` (ver secção seguinte).
 
 ### 4. Verificação do movimento da câmara
 
@@ -119,7 +121,20 @@ y = b / c
 
 O resultado é uma posição `(x, y)` em metros, com origem no ponto de referência `1` do campo. Dentro dos limites definidos, `x` varia de 0 a 120 e `y` de 0 a 70.
 
-`update_tracks` acrescenta `feet_px` e `position_m` aos objetos recebidos. Sem uma matriz válida, `position_m` fica a `None`. O `main.py` atualiza as categorias guardadas, mas apresenta apenas jogadores, incluindo guarda-redes, no minimapa.
+`update_tracks` acrescenta `feet_px` e `position_m` aos objetos recebidos. Sem uma matriz válida, `position_m` fica a `None`. O minimapa apresenta jogadores, guarda-redes e árbitros com as respetivas cores.
+
+### 6.1. Equipas, guarda-redes e árbitros
+
+`TeamAssigner`, em `team_assigner/team_assigner.py`, corre depois da homografia e não depende das classes do YOLO:
+
+1. Em cada 5.º frame, recorta a camisola (zona central da metade superior da bounding box), ignorando caixas pequenas ou sobrepostas.
+2. Remove os píxeis do relvado. A cor da relva é estimada **em cada frame** e comparada em tom, saturação e brilho, porque há equipamentos (por exemplo verde-lima) com o mesmo tom da relva.
+3. Calcula a cor mediana em LAB, dando menos peso à luminosidade para tolerar sombras.
+4. Agrupa as cores das tracks com KMeans (k=4). As duas equipas são os dois grupos com mais amostras e cores distintas; os centros são depois afinados sem os valores afastados.
+5. Cada track recebe a equipa mais votada nas suas amostras. Se a maioria estiver longe das duas equipas, a track é um "outro".
+6. Um "outro" junto a uma baliza (ou, sem homografia, marcado como `goalkeeper` pelo YOLO na maioria dos frames) é guarda-redes. A equipa é a que está, em média, mais perto dele frame a frame. Os restantes são árbitros e passam para `tracks["referees"]`.
+
+Cada jogador fica com `team` (0 ou 1), `role` (`player`, `goalkeeper` ou `referee`) e `team_color` (a cor real da camisola, em BGR).
 
 Os pés aproximam um ponto no plano do relvado, condição necessária para esta transformação. O centro do corpo ou uma bola no ar não pertencem a esse plano, pelo que a sua projeção não representa corretamente a posição no solo.
 
@@ -133,7 +148,7 @@ O painel permite inspecionar a coerência da projeção: um jogador junto à lin
 - `Fora` conta posições inválidas ou exteriores; esses pontos não são desenhados nem ajustados artificialmente às linhas.
 - `sem calibracao` indica que não existe uma homografia disponível para esse frame.
 
-As cores atuais não identificam equipas.
+As cores dos pontos correspondem às equipas; os árbitros aparecem a amarelo.
 
 ### 8. Exportação do vídeo
 
@@ -174,7 +189,7 @@ Quando não é possível projetar um jogador, `position_m` fica a `null`. O term
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install ultralytics supervision opencv-python numpy torch
+python -m pip install ultralytics "supervision<0.27" opencv-python numpy torch
 ```
 
 ### Preparar os ficheiros
@@ -228,6 +243,8 @@ FutTrack/
 │   ├── homografia.py          # Calibração e transformação de coordenadas
 │   ├── football_pitch.py      # Geometria e 32 pontos de referência do campo
 │   └── minimap.py             # Desenho do campo e posições projetadas
+├── team_assigner/
+│   └── team_assigner.py       # Equipas, guarda-redes e árbitros pela cor
 ├── utils/
 │   ├── video_utils.py         # Leitura, escrita e deteção de movimento
 │   └── bbox_utils.py          # Operações auxiliares sobre bounding boxes
@@ -258,6 +275,8 @@ Os IDs representam trajetórias temporais, não a identidade real dos jogadores.
 
 A precisão depende da deteção dos pés, da qualidade e distribuição dos keypoints e da correspondência entre o campo real e o modelo geométrico. A inspeção do minimapa ajuda a identificar erros visuais, mas não substitui uma avaliação quantitativa. Este README não apresenta resultados validados de precisão em metros, qualidade de tracking ou velocidade de processamento.
 
-O sistema atual também não implementa classificação por equipa, reconhecimento de jogadores, cálculo de velocidade, distância percorrida, posse de bola ou mapas de calor. Estes são possíveis desenvolvimentos a partir das posições exportadas, após validação da sua qualidade.
+A classificação por equipa usa a cor da camisola e falha quando um guarda-redes ou árbitro veste uma cor parecida com a de uma equipa, ou quando o ByteTrack troca IDs entre jogadores de equipas diferentes. O fluxo por fases (`yolo_inference.py`) ainda não usa o `TeamAssigner`.
+
+O sistema atual também não implementa reconhecimento de jogadores, cálculo de velocidade, distância percorrida, posse de bola ou mapas de calor. Estes são possíveis desenvolvimentos a partir das posições exportadas, após validação da sua qualidade.
 
 Os próximos passos incluem fixar versões das dependências, avaliar deteção, tracking e projeção com dados anotados e melhorar a estabilidade temporal da calibração.

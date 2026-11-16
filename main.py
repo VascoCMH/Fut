@@ -2,6 +2,7 @@ from utils import read_video, save_video, camera_moved
 from trackers import Tracker
 from homografia import Homography
 from homografia.minimap import PitchMinimap
+from team_assigner import TeamAssigner
 def main():
     #read the video
     video_path="input_videos/inputvideo.mp4"
@@ -33,17 +34,22 @@ def main():
         }
         homography.update_tracks(matrix, frame_tracks)
 
+    ##EQUIPAS (Separa equipas, guarda-redes e árbitros pela cor da camisola)###
+    team_assigner = TeamAssigner()
+    team_assigner.assign(frames, tracks, homography.pitch)
+
     drawn_frames = tracker.draw_annotations(frames, tracks)
 
     ##MINIMAP (Desenha a posição dos jogadores no campo)###
     minimap = PitchMinimap(homography.pitch)
     for frame_index, frame in enumerate(drawn_frames):
-        players = [
-            (track_id, player["position_m"])
-            for track_id, player in tracks["players"][frame_index].items()
-            if player["position_m"] is not None
+        people = [
+            (track_id, person["position_m"], person.get("team_color", (0, 220, 255)))
+            for category in ("players", "referees")
+            for track_id, person in tracks[category][frame_index].items()
+            if person["position_m"] is not None
         ]
-        minimap.overlay(frame, players, calibrated_frames[frame_index])
+        minimap.overlay(frame, people, calibrated_frames[frame_index])
 
     #save the video
     output_path="output_videos/outputvideo.mp4"

@@ -11,7 +11,7 @@ class PitchMinimap:
         self.width = pitch.width / 100
 
     def overlay(self, frame, players, calibrated):
-        """players contém pares (ID de tracking, posição em metros).
+        """players contém (ID de tracking, posição em metros[, cor BGR]).
 
         Pontos fora do campo são contados, sem os prender às linhas do campo.
         """
@@ -53,7 +53,9 @@ class PitchMinimap:
             cv2.circle(panel, pixel(point), 2, (220, 220, 220), -1)
 
         outside = 0
-        for number, position in players:
+        for item in players:
+            number, position = item[0], item[1]
+            color = item[2] if len(item) > 2 else (0, 220, 255)
             x, y = position
             if not np.isfinite(position).all() or not (
                 0 <= x <= self.length and 0 <= y <= self.width
@@ -62,7 +64,7 @@ class PitchMinimap:
                 continue
             location = pixel(position)
             cv2.circle(panel, location, 5, (0, 0, 0), -1)
-            cv2.circle(panel, location, 4, (0, 220, 255), -1)
+            cv2.circle(panel, location, 4, color, -1)
             cv2.putText(panel, str(number), (location[0] + 5, location[1] - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
