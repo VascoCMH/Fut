@@ -94,6 +94,11 @@ class Tracker:
                 color = player.get("team_color",(0,0,255))
                 frame = self.draw_ellipse(frame, player["bbox"],color, track_id)
 
+            # Draw referees
+            for track_id, referee in referee_dict.items():
+                color = referee.get("team_color", (0, 255, 255))
+                frame = self.draw_ellipse(frame, referee["bbox"], color)
+
             # Draw ball 
             for track_id, ball in ball_dict.items():
                 frame = self.draw_traingle(frame, ball["bbox"],(0,255,0))
@@ -119,9 +124,16 @@ class Tracker:
             # Covert to supervision Detection format
             detection_supervision = sv.Detections.from_ultralytics(detection)
 
-            # Convert GoalKeeper to player object
-            for object_ind , class_id in enumerate(detection_supervision.class_id):
-                if cls_names[class_id] == "goalkeeper":
+            # Juntar jogador, guarda-redes e árbitro numa só classe "pessoa".
+            # As classes do modelo ainda não são fiáveis; a distinção é feita
+            # depois pela cor (TeamAssigner). A classe original fica como pista.
+            person_classes = {"player", "goalkeeper", "referee"}
+            yolo_classes = np.array(
+                [cls_names[c] for c in detection_supervision.class_id], dtype=object
+            )
+            detection_supervision.data["yolo_class"] = yolo_classes
+            for object_ind, class_name in enumerate(yolo_classes):
+                if class_name in person_classes:
                     detection_supervision.class_id[object_ind] = cls_names_inv["player"]
 
             # Track Objects
@@ -137,10 +149,10 @@ class Tracker:
                 track_id = frame_detection[4]
 
                 if cls_id == cls_names_inv['player']:
-                    tracks["players"][frame_num][track_id] = {"bbox":bbox}
-                
-                if cls_id == cls_names_inv['referee']:
-                    tracks["referees"][frame_num][track_id] = {"bbox":bbox}
+                    tracks["players"][frame_num][track_id] = {
+                        "bbox": bbox,
+                        "yolo_class": frame_detection[5]["yolo_class"],
+                    }
             
             for frame_detection in detection_supervision:
                 bbox = frame_detection[0].tolist()
