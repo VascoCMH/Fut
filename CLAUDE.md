@@ -38,7 +38,9 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   homografia. A lógica de cor pode ser testada sem homografia, porque os
   guarda-redes passam a ser decididos em píxeis.
 - O vídeo de teste `input_videos/inputvideo.mp4` tem 1920×1080, 25 fps e 750
-  frames. A deteção em CPU demora cerca de 28 s para 150 frames.
+  frames. A deteção em CPU demora cerca de 28 s para 150 frames. Os vídeos
+  (entrada e saída) não estão no repositório (`.gitignore`), por isso nas
+  sessões na cloud é preciso fornecê-lo à parte.
 
 ## Estado atual
 - Feito: classificação por cor validada visualmente nos primeiros 150 frames
