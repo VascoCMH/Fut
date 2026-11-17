@@ -101,6 +101,8 @@ class Tracker:
                 color = player.get("team_color",(0,0,255))
                 label = player.get("global_id", track_id)
                 frame = self.draw_ellipse(frame, player["bbox"], color, label)
+                if player.get("has_ball"):
+                    frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
 
             # Draw referees
             for track_id, referee in referee_dict.items():
@@ -108,8 +110,10 @@ class Tracker:
                 frame = self.draw_ellipse(frame, referee["bbox"], color)
 
             # Draw ball 
+            # Bola detetada: verde; posição interpolada: verde-claro.
             for track_id, ball in ball_dict.items():
-                frame = self.draw_traingle(frame, ball["bbox"],(0,255,0))
+                color = (170, 255, 170) if ball.get("interpolated") else (0, 255, 0)
+                frame = self.draw_traingle(frame, ball["bbox"], color)
 
             output_video_frames.append(frame)
 
@@ -175,10 +179,14 @@ class Tracker:
                         "yolo_class": frame_detection[5]["yolo_class"],
                     }
             
-            for frame_detection in detection_supervision:
-                bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[3]
-
-                if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {"bbox":bbox}
+            # Bola: guardar a deteção mais confiante e todas as candidatas
+            # (pode haver falsos positivos; o BallTracker escolhe a coerente).
+            candidates = [
+                {"bbox": d[0].tolist(), "confidence": float(d[2])}
+                for d in detection_supervision
+                if d[3] == cls_names_inv['ball']
+            ]
+            if candidates:
+                best = max(candidates, key=lambda c: c["confidence"])
+                tracks["ball"][frame_num][1] = {**best, "candidates": candidates}
         return tracks

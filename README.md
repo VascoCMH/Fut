@@ -14,6 +14,9 @@ O projeto explora a ligação entre **deep learning, tracking de múltiplos obje
 - Deteção de 32 pontos de referência do campo e estimação de homografia com RANSAC.
 - Projeção dos pés dos jogadores para coordenadas em metros.
 - Verificação de movimento da câmara para decidir quando recalibrar no `main.py`.
+- Reidentificação de jogadores que desaparecem e voltam (`global_id`).
+- Limpeza de falsos positivos e interpolação da trajetória da bola.
+- Posse de bola por frame (equipa 0, equipa 1 ou disputada), com painel de percentagens no vídeo.
 - Sobreposição de um minimapa com os IDs apresentados no vídeo.
 - Execução alternativa por fases, com exportação JSON e medição de tempos.
 
@@ -70,7 +73,7 @@ tracks
 └── ball     → lista de frames → deteção da bola
 ```
 
-A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. No desenho do `main.py`, os jogadores recebem elipses e IDs com a cor da equipa, os árbitros recebem elipses amarelas e a bola é assinalada com um triângulo. A lista `referees` é preenchida pelo `TeamAssigner` (ver secção seguinte).
+A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. Fica a deteção mais confiante do frame, com a confiança e a lista de todas as candidatas (para a limpeza da secção 6.3). No desenho do `main.py`, os jogadores recebem elipses e IDs com a cor da equipa, os árbitros recebem elipses amarelas e a bola é assinalada com um triângulo (verde se foi detetada, verde-claro se foi interpolada). O jogador com a bola recebe um triângulo vermelho. A lista `referees` é preenchida pelo `TeamAssigner` (ver secção seguinte).
 
 ### 4. Verificação do movimento da câmara
 
@@ -149,6 +152,23 @@ Quando um jogador desaparece (oclusão ou saída de imagem) e volta, o ByteTrack
 O vídeo e o minimapa mostram o `global_id`; o ID do ByteTrack mantém-se como chave em `tracks`. No fim, o terminal apresenta um resumo por grupo (tracks, identidades e ligações). No vídeo de teste, o resultado é de 10 + 10 jogadores de campo, 1 + 1 guarda-redes e 3 árbitros.
 
 Os pés aproximam um ponto no plano do relvado, condição necessária para esta transformação. O centro do corpo ou uma bola no ar não pertencem a esse plano, pelo que a sua projeção não representa corretamente a posição no solo.
+
+### 6.3. Bola: limpeza, interpolação e posse
+
+`BallTracker`, em `ball/ball_tracker.py`:
+
+1. **Limpeza (antes da homografia, só em píxeis).** A trajetória é dividida em segmentos coerentes (deslocação até `30 px + 70 px × frames`). Segmentos de até 3 frames incoerentes com os vizinhos dos dois lados são falsos positivos e são removidos. Nos frames que ficam sem bola, aceita-se outra candidata do detetor se for coerente com os vizinhos. No vídeo de teste: 5 falsos positivos removidos (saltos de até 886 px num frame) e 2 recuperados.
+2. **Interpolação (depois da homografia).** Nas lacunas até 50 frames (2 s), assume-se que a bola se moveu a velocidade constante em linha reta. Se houver homografia em toda a lacuna, interpola-se em metros no campo e projeta-se para a imagem de cada frame, o que é correto mesmo com a câmara em movimento; senão, interpola-se em píxeis. Não se extrapola antes da primeira nem depois da última deteção. As posições criadas têm `interpolated=True` e `gap_frames`. No vídeo de teste, a bola passa de 592 para 750 frames.
+
+`PossessionAssigner`, em `ball/possession.py`, usa a distância dos pés de cada jogador à bola (em metros; sem homografia, em píxeis convertidos pela altura do jogador):
+
+- ninguém a menos de **2,5 m** → bola livre (passe ou remate): **mantém a posse anterior**;
+- jogadores das duas equipas dentro do raio, com distâncias a menos de **1 m** uma da outra → **disputada**;
+- caso contrário → equipa do jogador mais próximo, que fica com `has_ball=True`.
+
+Uma mudança de posse só é aceite se durar **5 frames seguidos**. As posições interpoladas em lacunas com mais de **8 frames** não mudam a posse: a bola falha sobretudo quando está tapada nos pés de um jogador, e aí o movimento real (receção, condução, passe) não é uma linha reta. A posição interpolada serve para desenhar, mas pode passar a 3–4 m de quem tem a bola.
+
+O vídeo mostra um painel com a posse atual e as percentagens acumuladas; o terminal mostra as percentagens finais. O raio de 2,5 m foi escolhido no vídeo de teste: com 1,5 m, a bola estava "livre" em 72 % dos frames (o jogador mais próximo está, em mediana, a 2,2 m, porque na condução a bola vai à frente do pé e a homografia tem erro).
 
 ### 7. Anotações e minimapa
 
@@ -261,8 +281,13 @@ FutTrack/
 │   ├── tracklets.py           # Vista por track (início, fim, posições, velocidade)
 │   ├── reid.py                # Ligação de tracks da mesma pessoa (global_id)
 │   └── diagnostics.py         # Resumo de tracks e identidades por grupo
+├── ball/
+│   ├── ball_tracker.py        # Limpeza e interpolação da trajetória da bola
+│   ├── possession.py          # Posse de bola por frame
+│   └── drawing.py             # Painel de posse no vídeo
 ├── tests/
-│   └── test_reid.py           # Testes sintéticos do ReID (python -m pytest tests/)
+│   ├── test_reid.py           # Testes sintéticos do ReID (python -m pytest tests/)
+│   └── test_ball.py           # Testes sintéticos da bola e da posse
 ├── utils/
 │   ├── video_utils.py         # Leitura, escrita e deteção de movimento
 │   └── bbox_utils.py          # Operações auxiliares sobre bounding boxes

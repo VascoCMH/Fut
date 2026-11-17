@@ -14,7 +14,8 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - `trackers/tracker.py`: deteção, tracking e desenho.
 - `team_assigner/team_assigner.py`: equipas, guarda-redes e árbitros pela cor.
 - `reid/`: reidentificação (`global_id`) por equipa, tempo e posição em metros.
-- `tests/`: testes sintéticos do ReID (`python -m pytest tests/`).
+- `ball/`: limpeza e interpolação da bola, posse de bola e painel.
+- `tests/`: testes sintéticos do ReID e da bola (`python -m pytest tests/`).
 - `homografia/`: calibração (`homografia.py`), geometria do campo 120×70 m
   (`football_pitch.py`), minimapa (`minimap.py`).
 - `modelo/player.pt` (deteção, classes player/goalkeeper/referee/ball),
@@ -40,6 +41,15 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   sobreposição, ≤10 s, |início(B) − previsão(A)| ≤ 2 m + 8 m/s·dt) → algoritmo
   húngaro → rejeitar ligações ambíguas → `global_id`. GR sem limite de tempo.
   `lost_track_buffer=100` no ByteTrack.
+- **Bola**: limpeza em píxeis ANTES da homografia (segmentos ≤3 frames
+  incoerentes com ambos os vizinhos → falso positivo; recuperar outra
+  candidata coerente); interpolação linear DEPOIS da homografia, em metros
+  quando há matriz em toda a lacuna (≤50 frames), senão em píxeis.
+- **Posse**: raio 2,5 m (1,5 m deixava 72 % dos frames "livres"); disputada se
+  as duas equipas estão no raio com diferença <1 m; livre mantém a posse
+  anterior; mudança só após 5 frames; interpolações de lacunas >8 frames NÃO
+  decidem a posse (a bola falha sobretudo quando está tapada nos pés de
+  alguém, e a linha reta passa a 3–4 m de quem a tem; visto no frame 664).
 - Cores no desenho: cor real da camisola da equipa; árbitros a amarelo;
   sem equipa a cinzento.
 
@@ -64,7 +74,16 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - Feito: ReID validado no vídeo completo com homografia: 25 identidades
   (10+10 jogadores, 1+1 GR, 3 árbitros) a partir de 30 tracks; 4 ligações
   corretas (verificadas visualmente), 0 ambíguas.
+- Feito: bola e posse no vídeo completo: bola em 750/750 frames (592
+  detetados, 5 falsos positivos removidos, 161 interpolados); posse 44 % /
+  49 % / 6 % disputada; deteções verificadas visualmente (frames 648–720).
 - Por fazer / ideias:
+  - Posse: validar com anotação manual de alguns segundos; usar a velocidade
+    da bola para distinguir passe de condução; bola no ar (a projeção para
+    metros só vale com a bola no chão).
+  - ReID com perfil tático (posição relativa à forma da equipa) + conjunto
+    fechado (≤11 por equipa) + aparência, combinados num só custo. Precisa
+    de um vídeo mais longo para validar.
   - ReID com aparência (OSNet/torchreid) e número da camisola (OCR), para
     ausências longas e cortes de câmara. Detetar cortes de câmara.
   - Melhorar o modelo: mais dados (Roboflow Universe e frames próprios),
@@ -81,3 +100,6 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   PR VascoCMH/Fut#1 para o main (integrado).
 - 2026-11-16 (cont.): ReID (`reid/`, `global_id`), NMS após fusão de
   classes, nova regra de guarda-redes, numeração estável das equipas, testes.
+- 2026-11-17: bola (`ball/`): limpeza de falsos positivos, interpolação em
+  metros, posse de bola com painel; o tracker guarda a confiança e as
+  candidatas da bola. Ideia do Vasco para o ReID (perfil tático) registada.
