@@ -7,7 +7,7 @@ from utils import get_center_of_bbox, get_bbox_width
 class Tracker:
     def __init__(self, model_path):
         self.model = YOLO(model_path)
-        self.tracker = sv.ByteTrack()
+        self.tracker = sv.ByteTrack(lost_track_buffer=90)
 
     def detect_track(self, frames):
         results=[]
