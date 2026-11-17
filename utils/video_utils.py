@@ -12,6 +12,42 @@ def read_video(video_path):
     return fps, frames
 
 
+def video_info(video_path):
+    """(fps, nº de frames, largura, altura) sem ler o vídeo."""
+    vid = cv2.VideoCapture(video_path)
+    if not vid.isOpened():
+        raise FileNotFoundError(f"Não foi possível abrir o vídeo: {video_path}")
+    info = (vid.get(cv2.CAP_PROP_FPS), int(vid.get(cv2.CAP_PROP_FRAME_COUNT)),
+            int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)), int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    vid.release()
+    return info
+
+
+def iter_frames(video_path):
+    """Lê o vídeo frame a frame, sem o guardar todo em memória."""
+    vid = cv2.VideoCapture(video_path)
+    try:
+        while True:
+            ret, frame = vid.read()
+            if not ret:
+                break
+            yield frame
+    finally:
+        vid.release()
+
+
+def iter_batches(video_path, batch_size=32):
+    """Lê o vídeo em lotes de `batch_size` frames."""
+    batch = []
+    for frame in iter_frames(video_path):
+        batch.append(frame)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def save_video(frames, output_path, fps):
     fourcc=cv2.VideoWriter_fourcc(*'mp4v')
     out=cv2.VideoWriter(output_path, fourcc, fps, (frames[0].shape[1], frames[0].shape[0]))

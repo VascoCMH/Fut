@@ -50,9 +50,12 @@ flowchart TD
 
 ### 1. Leitura do vídeo
 
-A função `read_video`, em `utils/video_utils.py`, abre o vídeo com OpenCV, obtém os FPS e lê os frames. No `main.py`, todos os frames ficam em memória antes de iniciar a análise. Os FPS são usados na exportação para preservar a cadência de reprodução.
+O `main.py` processa o vídeo **em streaming**, sem nunca o ter todo em memória (um frame de 1920×1080 ocupa cerca de 6,2 MB, por isso 5 minutos a 25 fps seriam mais de 50 GB). Lê o vídeo duas vezes, com `iter_batches` e `iter_frames`, de `utils/video_utils.py`:
 
-Esta abordagem facilita o acesso às imagens nas várias etapas, mas o consumo de memória aumenta com a duração e a resolução do vídeo.
+1. **Análise:** lotes de 32 frames → deteção e tracking (o mesmo ByteTrack mantém o estado entre lotes) → homografia → recolha das cores das camisolas (`TeamAssigner.add_frame`). No fim ficam apenas as `tracks` e as matrizes de homografia, e correm as etapas que precisam do vídeo todo: equipas, ReID, limpeza e interpolação da bola e posse.
+2. **Desenho:** volta a ler o vídeo, desenha cada frame (`Tracker.draw_frame`, minimapa e painel de posse) e escreve-o logo no ficheiro de saída.
+
+No vídeo de teste, o pico de memória passou de cerca de 9 GB para 3,5 GB. Depois de carregar os modelos (≈1,9 GB), cresce apenas cerca de 0,2 GB por cada 750 frames (as `tracks`), o que dá uns 4–5 GB para 5 minutos. Os FPS são usados na exportação para preservar a cadência de reprodução. `read_video` continua disponível para scripts que precisem dos frames em memória.
 
 ### 2. Deteção dos objetos
 
@@ -184,7 +187,7 @@ As cores dos pontos correspondem às equipas; os árbitros aparecem a amarelo.
 
 ### 8. Exportação do vídeo
 
-O programa guarda os frames anotados em `output_videos/outputvideo.mp4`, usando o codec `mp4v` e os FPS obtidos na leitura. O resultado reúne o vídeo original, as anotações dos objetos e o minimapa.
+O programa escreve cada frame anotado em `output_videos/outputvideo.mp4` assim que é desenhado, usando o codec `mp4v` e os FPS obtidos na leitura. O resultado reúne o vídeo original, as anotações dos objetos e o minimapa.
 
 ## Execução por fases e exportação JSON
 

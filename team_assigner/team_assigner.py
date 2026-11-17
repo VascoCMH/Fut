@@ -101,12 +101,19 @@ class TeamAssigner:
                 return True
         return False
 
-    def collect_samples(self, frames, player_tracks):
-        """Recolhe cores por track ID, ignorando caixas pequenas ou sobrepostas."""
-        samples = defaultdict(list)
-        for frame_num in range(0, len(frames), self.sample_step):
-            players = player_tracks[frame_num]
-            grass = self.grass_color(frames[frame_num])
+    def add_frame(self, frame_num, frame, players):
+        """Recolhe as cores das camisolas de UM frame (para ler o vídeo em
+        streaming, sem o guardar todo em memória).
+
+        Nos frames múltiplos de `sample_step`, usa caixas grandes e sem
+        sobreposição. Nos restantes, guarda uma reserva (até `min_samples`
+        por track, aceitando sobreposição) para as tracks curtas que não
+        calharem nos frames amostrados.
+        """
+        if not hasattr(self, "_samples"):
+            self._samples, self._reserve = defaultdict(list), defaultdict(list)
+        if frame_num % self.sample_step == 0:
+            grass = self.grass_color(frame)
             boxes = {tid: p["bbox"] for tid, p in players.items()}
             for track_id, bbox in boxes.items():
                 if bbox[3] - bbox[1] < self.min_box_height:
@@ -114,22 +121,35 @@ class TeamAssigner:
                 others = [b for t, b in boxes.items() if t != track_id]
                 if self._overlaps(bbox, others):
                     continue
-                color = self.shirt_color(frames[frame_num], bbox, grass)
+                color = self.shirt_color(frame, bbox, grass)
                 if color is not None:
-                    samples[track_id].append(color)
+                    self._samples[track_id].append(color)
+            return
+        grass = None
+        for track_id, player in players.items():
+            if len(self._reserve[track_id]) >= self.min_samples:
+                continue
+            if grass is None:
+                grass = self.grass_color(frame)
+            color = self.shirt_color(frame, player["bbox"], grass)
+            if color is not None:
+                self._reserve[track_id].append(color)
 
-        # Tracks curtas que não calharam nos frames amostrados: tentar todos os
-        # frames, aceitando sobreposição, até juntar algumas amostras.
-        for frame_num, players in enumerate(player_tracks):
-            for track_id, player in players.items():
-                if len(samples[track_id]) >= self.min_samples:
-                    continue
-                if frame_num % self.sample_step == 0 and samples[track_id]:
-                    continue
-                color = self.shirt_color(frames[frame_num], player["bbox"])
-                if color is not None:
-                    samples[track_id].append(color)
-        return {t: c for t, c in samples.items() if c}
+    def samples(self):
+        """Cores por track; tracks com poucas amostras usam também a reserva."""
+        samples = {t: list(c) for t, c in getattr(self, "_samples", {}).items() if c}
+        for track_id, reserve in getattr(self, "_reserve", {}).items():
+            current = samples.get(track_id, [])
+            if len(current) < self.min_samples and reserve:
+                samples[track_id] = current + reserve[:self.min_samples - len(current)]
+        return samples
+
+    def collect_samples(self, frames, player_tracks):
+        """Recolhe cores de uma lista de frames em memória."""
+        self._samples, self._reserve = defaultdict(list), defaultdict(list)
+        for frame_num, frame in enumerate(frames):
+            self.add_frame(frame_num, frame, player_tracks[frame_num])
+        return self.samples()
 
     # ------------------------------------------------------------ clustering
     def _distances(self, colors):
@@ -301,10 +321,13 @@ class TeamAssigner:
         """Acrescenta team, role e team_color a cada jogador e move os árbitros
         de tracks["players"] para tracks["referees"]. Altera tracks no lugar.
 
+        frames: lista de frames em memória, ou None se as cores já foram
+        recolhidas com add_frame (leitura em streaming).
         Deve ser chamado depois da homografia (usa position_m se existir).
         """
         players = tracks["players"]
-        samples = self.collect_samples(frames, players)
+        samples = (self.collect_samples(frames, players) if frames is not None
+                   else self.samples())
         reliable = {t: c for t, c in samples.items() if len(c) >= self.min_samples}
         if len(reliable) < 2:
             reliable = {t: c for t, c in samples.items() if c}

@@ -1,7 +1,5 @@
 """Painel de posse de bola (percentagens acumuladas até ao frame atual)."""
 
-from collections import Counter
-
 import cv2
 
 from .possession import DISPUTED
@@ -11,23 +9,22 @@ TEXT = (255, 255, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
-def draw_possession(frame, possession_so_far, team_colors, origin=(20, 20)):
-    """possession_so_far: lista de posse desde o início até este frame."""
-    known = [p for p in possession_so_far if p is not None]
-    counts = Counter(known)
-    total = max(len(known), 1)
+def draw_possession(frame, counts, current, team_colors, origin=(20, 20)):
+    """counts: Counter da posse desde o início até este frame (0, 1,
+    "disputed"); current: posse neste frame. Recebe contagens acumuladas em
+    vez da lista completa para não ser O(n²) em vídeos longos."""
+    total = max(sum(counts.get(s, 0) for s in (0, 1, DISPUTED)), 1)
     states = [0, 1, DISPUTED]
     shares = {s: counts.get(s, 0) / total for s in states}
     colors = {0: team_colors.get(0, DISPUTED_COLOR), 1: team_colors.get(1, DISPUTED_COLOR),
               DISPUTED: DISPUTED_COLOR}
     names = {0: "Equipa 0", 1: "Equipa 1", DISPUTED: "Disputada"}
-    current = possession_so_far[-1] if possession_so_far else None
 
     x0, y0 = origin
     width, height = 420, 112
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x0, y0), (x0 + width, y0 + height), (30, 30, 30), -1)
-    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+    # Fundo escuro semitransparente (só na zona do painel).
+    roi = frame[y0:y0 + height, x0:x0 + width]
+    roi[:] = (0.25 * roi + 0.75 * 30).astype(roi.dtype)
 
     now = "sem bola" if current is None else names[current]
     cv2.putText(frame, f"Posse de bola  |  agora: {now}", (x0 + 12, y0 + 26),

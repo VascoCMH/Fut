@@ -9,7 +9,8 @@ Visão computacional em Python: vídeo de futebol → deteção (YOLO) → track
 metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 (em português de Portugal; manter assim).
 
-- `main.py`: fluxo principal (todos os frames em memória).
+- `main.py`: fluxo principal em streaming (2 passagens: análise e desenho;
+  nunca guarda o vídeo todo em memória).
 - `yolo_inference.py`: fluxo por fases com exportação JSON (não usa o TeamAssigner).
 - `trackers/tracker.py`: deteção, tracking e desenho.
 - `team_assigner/team_assigner.py`: equipas, guarda-redes e árbitros pela cor.
@@ -50,6 +51,13 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   anterior; mudança só após 5 frames; interpolações de lacunas >8 frames NÃO
   decidem a posse (a bola falha sobretudo quando está tapada nos pés de
   alguém, e a linha reta passa a 3–4 m de quem a tem; visto no frame 664).
+- **Streaming**: com 5 min (9000 frames) guardar os frames dava MemoryError
+  (~56 GB). Passagem 1 em lotes (tracking, homografia, `TeamAssigner.add_frame`),
+  depois equipas/ReID/bola/posse só com as tracks; passagem 2 desenha e escreve
+  frame a frame (`Tracker.draw_frame`). A limpeza da bola corre depois da
+  homografia, e as posições da bola são recalculadas com as matrizes guardadas.
+  Painel de posse recebe contagens acumuladas (não a lista: seria O(n²)).
+  Não voltar a guardar listas de frames no `main.py`.
 - Cores no desenho: cor real da camisola da equipa; árbitros a amarelo;
   sem equipa a cinzento.
 
@@ -77,6 +85,9 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - Feito: bola e posse no vídeo completo: bola em 750/750 frames (592
   detetados, 5 falsos positivos removidos, 161 interpolados); posse 44 % /
   49 % / 6 % disputada; deteções verificadas visualmente (frames 648–720).
+- Feito: `main.py` em streaming; mesmos resultados no vídeo de teste; pico
+  de memória 3,5 GB (antes ~9 GB), cresce ~0,2 GB por 750 frames. Tempo em
+  CPU: 563 s para 30 s de vídeo (5 min em CPU ≈ 1,5 h; com GPU muito menos).
 - Por fazer / ideias:
   - Posse: validar com anotação manual de alguns segundos; usar a velocidade
     da bola para distinguir passe de condução; bola no ar (a projeção para
@@ -103,3 +114,6 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - 2026-11-17: bola (`ball/`): limpeza de falsos positivos, interpolação em
   metros, posse de bola com painel; o tracker guarda a confiança e as
   candidatas da bola. Ideia do Vasco para o ReID (perfil tático) registada.
+- 2026-11-17 (cont.): `main.py` em streaming por causa do MemoryError com um
+  vídeo de 5 min. Regras do Vasco para o ReID (equipa+classe, plantel
+  fechado, único no raio, aparência + posição média) discutidas, por fazer.
