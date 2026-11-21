@@ -5,9 +5,9 @@ import supervision as sv
 from utils import get_center_of_bbox, get_bbox_width
 
 class Tracker:
-    def __init__(self, model_path, fps=25, lost_track_buffer=100):
+    def __init__(self, model_path, fps=25, lost_track_buffer=90):
         """lost_track_buffer: nº de frames durante os quais o ByteTrack se
-        lembra de uma pessoa perdida (100 frames = 4 s a 25 fps). O valor por
+        lembra de uma pessoa perdida (90 frames = 3,6 s a 25 fps). O valor por
         omissão do ByteTrack (30) só cobre oclusões de ~1 s.
         """
         self.model = YOLO(model_path)

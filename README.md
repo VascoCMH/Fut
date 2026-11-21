@@ -65,7 +65,7 @@ Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2
 
 ### 3. Tracking entre frames
 
-O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado. O tracker usa os FPS do vídeo e lembra-se de uma pessoa perdida durante 100 frames (`lost_track_buffer`, 4 s a 25 fps). Desaparecimentos mais longos são tratados pelo ReID (secção 6.2).
+O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado. O tracker usa os FPS do vídeo e lembra-se de uma pessoa perdida durante 90 frames (`lost_track_buffer`, 3,6 s a 25 fps). Desaparecimentos mais longos são tratados pelo ReID (secção 6.2).
 
 Os resultados são organizados por categoria, frame e ID:
 

@@ -1,14 +1,33 @@
-output_videos/*.mp4
-runs/**/inputvideo.avi
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Vídeos (entrada e saída)
 *.mp4
 *.avi
 *.mov
+*.mkv
+input_videos/
+output_videos/
+
+# Resultados de correr o programa e do treino (Ultralytics)
 runs/
-output_videos/
-runs/detect/predict/
-output_videos/
-*.avi
-*.mp4
-input_videos/*.mp4
-__pycache__/
-*.pyc
+training/runs/
+*.cache
+
+# Pesos pré-treinados descarregados automaticamente pelo Ultralytics
+# (os modelos do projeto ficam em modelo/ e continuam versionados)
+yolo*.pt
+training/weights/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

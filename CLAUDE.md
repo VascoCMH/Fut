@@ -41,7 +41,7 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - **ReID** (`reid/`): tracklets → custo físico (mesma equipa/papel, sem
   sobreposição, ≤10 s, |início(B) − previsão(A)| ≤ 2 m + 8 m/s·dt) → algoritmo
   húngaro → rejeitar ligações ambíguas → `global_id`. GR sem limite de tempo.
-  `lost_track_buffer=100` no ByteTrack.
+  `lost_track_buffer=90` no ByteTrack (valor escolhido pelo Vasco).
 - **Bola**: limpeza em píxeis ANTES da homografia (segmentos ≤3 frames
   incoerentes com ambos os vizinhos → falso positivo; recuperar outra
   candidata coerente); interpolação linear DEPOIS da homografia, em metros
@@ -72,7 +72,11 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   Para experiências, guardar em cache as deteções (`sv.Detections`) e as
   matrizes, e usar `Tracker.tracks_from_detections`.
 - O vídeo de teste `input_videos/inputvideo.mp4` tem 1920×1080, 25 fps e 750
-  frames. A deteção em CPU demora cerca de 28 s para 150 frames.
+  frames. A deteção em CPU demora cerca de 28 s para 150 frames. Os vídeos
+  (entrada e saída) não estão no repositório (`.gitignore`), por isso nas
+  sessões na cloud é preciso fornecê-lo à parte. O vídeo de teste ainda está
+  no histórico do git: `mkdir -p input_videos && git show
+  17dcba3~1:input_videos/inputvideo.mp4 > input_videos/inputvideo.mp4`.
 
 ## Estado atual
 - Feito: classificação por cor validada visualmente nos primeiros 150 frames
@@ -117,3 +121,8 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - 2026-11-17 (cont.): `main.py` em streaming por causa do MemoryError com um
   vídeo de 5 min. Regras do Vasco para o ReID (equipa+classe, plantel
   fechado, único no raio, aparência + posição média) discutidas, por fazer.
+- 2026-11-21: merge do `main` (commits "Fine Tuning" do Vasco: `.gitignore`
+  novo em UTF-8, vídeos e resultados de treino fora do repositório,
+  `lost_track_buffer=90`) no branch; conflitos resolvidos (`.gitignore` do
+  Vasco; `Tracker` parametrizado com 90 por defeito). ReID atual NÃO serve
+  para um jogo completo (limite de 10 s, cortes de câmara, escala das tracks).
