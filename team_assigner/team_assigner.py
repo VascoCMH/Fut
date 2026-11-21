@@ -13,8 +13,9 @@ Etapas:
    valores afastados.
 4. Cada track recebe a equipa mais votada nas suas amostras; se a maioria das
    amostras for afastada das duas equipas, fica como "outro".
-5. Os "outros" que estão perto de uma baliza são guarda-redes (da equipa que
-   defende esse lado); os restantes são árbitros.
+5. Os "outros" que são quase sempre a pessoa mais recuada do campo (e não
+   estão junto à linha lateral) são guarda-redes, da equipa que está mais
+   perto deles; os restantes são árbitros.
 """
 
 from collections import Counter, defaultdict
@@ -100,12 +101,19 @@ class TeamAssigner:
                 return True
         return False
 
-    def collect_samples(self, frames, player_tracks):
-        """Recolhe cores por track ID, ignorando caixas pequenas ou sobrepostas."""
-        samples = defaultdict(list)
-        for frame_num in range(0, len(frames), self.sample_step):
-            players = player_tracks[frame_num]
-            grass = self.grass_color(frames[frame_num])
+    def add_frame(self, frame_num, frame, players):
+        """Recolhe as cores das camisolas de UM frame (para ler o vídeo em
+        streaming, sem o guardar todo em memória).
+
+        Nos frames múltiplos de `sample_step`, usa caixas grandes e sem
+        sobreposição. Nos restantes, guarda uma reserva (até `min_samples`
+        por track, aceitando sobreposição) para as tracks curtas que não
+        calharem nos frames amostrados.
+        """
+        if not hasattr(self, "_samples"):
+            self._samples, self._reserve = defaultdict(list), defaultdict(list)
+        if frame_num % self.sample_step == 0:
+            grass = self.grass_color(frame)
             boxes = {tid: p["bbox"] for tid, p in players.items()}
             for track_id, bbox in boxes.items():
                 if bbox[3] - bbox[1] < self.min_box_height:
@@ -113,22 +121,35 @@ class TeamAssigner:
                 others = [b for t, b in boxes.items() if t != track_id]
                 if self._overlaps(bbox, others):
                     continue
-                color = self.shirt_color(frames[frame_num], bbox, grass)
+                color = self.shirt_color(frame, bbox, grass)
                 if color is not None:
-                    samples[track_id].append(color)
+                    self._samples[track_id].append(color)
+            return
+        grass = None
+        for track_id, player in players.items():
+            if len(self._reserve[track_id]) >= self.min_samples:
+                continue
+            if grass is None:
+                grass = self.grass_color(frame)
+            color = self.shirt_color(frame, player["bbox"], grass)
+            if color is not None:
+                self._reserve[track_id].append(color)
 
-        # Tracks curtas que não calharam nos frames amostrados: tentar todos os
-        # frames, aceitando sobreposição, até juntar algumas amostras.
-        for frame_num, players in enumerate(player_tracks):
-            for track_id, player in players.items():
-                if len(samples[track_id]) >= self.min_samples:
-                    continue
-                if frame_num % self.sample_step == 0 and samples[track_id]:
-                    continue
-                color = self.shirt_color(frames[frame_num], player["bbox"])
-                if color is not None:
-                    samples[track_id].append(color)
-        return {t: c for t, c in samples.items() if c}
+    def samples(self):
+        """Cores por track; tracks com poucas amostras usam também a reserva."""
+        samples = {t: list(c) for t, c in getattr(self, "_samples", {}).items() if c}
+        for track_id, reserve in getattr(self, "_reserve", {}).items():
+            current = samples.get(track_id, [])
+            if len(current) < self.min_samples and reserve:
+                samples[track_id] = current + reserve[:self.min_samples - len(current)]
+        return samples
+
+    def collect_samples(self, frames, player_tracks):
+        """Recolhe cores de uma lista de frames em memória."""
+        self._samples, self._reserve = defaultdict(list), defaultdict(list)
+        for frame_num, frame in enumerate(frames):
+            self.add_frame(frame_num, frame, player_tracks[frame_num])
+        return self.samples()
 
     # ------------------------------------------------------------ clustering
     def _distances(self, colors):
@@ -180,8 +201,11 @@ class TeamAssigner:
                     self.centers[t] = self._weighted_median(data[members],
                                                             weights[members])
 
-        # Ordem estável: equipa A é a camisola mais clara.
-        order = np.argsort(-self.centers[:, 0])
+        # Ordem estável: ordenar pelo canal (L, a ou b) em que as duas cores
+        # mais diferem; ordenar sempre por L troca as equipas quando ambas as
+        # camisolas são claras (p. ex. branco e verde-lima).
+        channel = np.argmax(np.abs(self.centers[0] - self.centers[1]) * LAB_WEIGHTS)
+        order = np.argsort(-self.centers[:, channel])
         self.centers = self.centers[order]
         for team, center in enumerate(self.centers):
             lab = np.clip(center, 0, 255).astype(np.uint8).reshape(1, 1, 3)
@@ -245,21 +269,46 @@ class TeamAssigner:
                 votes[min(means, key=lambda t: abs(means[t] - gk_x))] += 1
         return votes.most_common(1)[0][0] if votes else None
 
+    def _deepest_share(self, player_tracks, track_id, team_of, min_players=6,
+                       min_fraction=0.9):
+        """Fração dos frames em que esta pessoa é a mais recuada do campo, i.e.
+        tem pelo menos `min_fraction` dos jogadores de campo do mesmo lado.
+
+        Um guarda-redes está quase sempre atrás de todos; um árbitro, no meio.
+        Não depende de uma distância fixa à baliza (o guarda-redes pode subir
+        quando a equipa ataca). Usa metros se houver homografia, senão píxeis.
+        """
+        deepest = total = 0
+        for frame in player_tracks:
+            if track_id not in frame:
+                continue
+            use_metres = frame[track_id].get("position_m") is not None
+            x = self._x(frame[track_id], use_metres)
+            others = [
+                self._x(p, use_metres) for tid, p in frame.items()
+                if tid in team_of and tid != track_id
+            ]
+            others = np.array([o for o in others if o is not None])
+            if x is None or len(others) < min_players:
+                continue
+            total += 1
+            behind = max(np.mean(others > x), np.mean(others < x))
+            deepest += behind >= min_fraction
+        return deepest / total if total else 0.0
+
     def _resolve_others(self, player_tracks, others, team_of, yolo_hints, pitch):
         """Separa os 'outros' em guarda-redes (com equipa) e árbitros."""
-        length = pitch.length / 100 if pitch is not None else 120.0
         width = pitch.width / 100 if pitch is not None else 70.0
         roles = {}
         for track_id in others:
             position = self._median_position(player_tracks, track_id)
             hint = yolo_hints.get(track_id, Counter())
-            near_goal = (
-                position is not None
-                and (position[0] < 20 or position[0] > length - 20)
-                and abs(position[1] - width / 2) < 22
-            )
             hint_gk = hint["goalkeeper"] > hint["referee"]
-            if not (near_goal or (position is None and hint_gk)):
+            share = self._deepest_share(player_tracks, track_id, team_of)
+            # Fiscais de linha também podem estar recuados, mas junto à linha.
+            central = position is None or abs(position[1] - width / 2) < 25
+            is_goalkeeper = central and (share >= 0.6 or (hint_gk and share >= 0.3))
+            if not is_goalkeeper:
                 roles[track_id] = ("referee", None)
                 continue
             roles[track_id] = (
@@ -272,10 +321,13 @@ class TeamAssigner:
         """Acrescenta team, role e team_color a cada jogador e move os árbitros
         de tracks["players"] para tracks["referees"]. Altera tracks no lugar.
 
+        frames: lista de frames em memória, ou None se as cores já foram
+        recolhidas com add_frame (leitura em streaming).
         Deve ser chamado depois da homografia (usa position_m se existir).
         """
         players = tracks["players"]
-        samples = self.collect_samples(frames, players)
+        samples = (self.collect_samples(frames, players) if frames is not None
+                   else self.samples())
         reliable = {t: c for t, c in samples.items() if len(c) >= self.min_samples}
         if len(reliable) < 2:
             reliable = {t: c for t, c in samples.items() if c}

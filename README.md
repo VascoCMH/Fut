@@ -14,6 +14,9 @@ O projeto explora a ligação entre **deep learning, tracking de múltiplos obje
 - Deteção de 32 pontos de referência do campo e estimação de homografia com RANSAC.
 - Projeção dos pés dos jogadores para coordenadas em metros.
 - Verificação de movimento da câmara para decidir quando recalibrar no `main.py`.
+- Reidentificação de jogadores que desaparecem e voltam (`global_id`).
+- Limpeza de falsos positivos e interpolação da trajetória da bola.
+- Posse de bola por frame (equipa 0, equipa 1 ou disputada), com painel de percentagens no vídeo.
 - Sobreposição de um minimapa com os IDs apresentados no vídeo.
 - Execução alternativa por fases, com exportação JSON e medição de tempos.
 
@@ -47,19 +50,22 @@ flowchart TD
 
 ### 1. Leitura do vídeo
 
-A função `read_video`, em `utils/video_utils.py`, abre o vídeo com OpenCV, obtém os FPS e lê os frames. No `main.py`, todos os frames ficam em memória antes de iniciar a análise. Os FPS são usados na exportação para preservar a cadência de reprodução.
+O `main.py` processa o vídeo **em streaming**, sem nunca o ter todo em memória (um frame de 1920×1080 ocupa cerca de 6,2 MB, por isso 5 minutos a 25 fps seriam mais de 50 GB). Lê o vídeo duas vezes, com `iter_batches` e `iter_frames`, de `utils/video_utils.py`:
 
-Esta abordagem facilita o acesso às imagens nas várias etapas, mas o consumo de memória aumenta com a duração e a resolução do vídeo.
+1. **Análise:** lotes de 32 frames → deteção e tracking (o mesmo ByteTrack mantém o estado entre lotes) → homografia → recolha das cores das camisolas (`TeamAssigner.add_frame`). No fim ficam apenas as `tracks` e as matrizes de homografia, e correm as etapas que precisam do vídeo todo: equipas, ReID, limpeza e interpolação da bola e posse.
+2. **Desenho:** volta a ler o vídeo, desenha cada frame (`Tracker.draw_frame`, minimapa e painel de posse) e escreve-o logo no ficheiro de saída.
+
+No vídeo de teste, o pico de memória passou de cerca de 9 GB para 3,5 GB. Depois de carregar os modelos (≈1,9 GB), cresce apenas cerca de 0,2 GB por cada 750 frames (as `tracks`), o que dá uns 4–5 GB para 5 minutos. Os FPS são usados na exportação para preservar a cadência de reprodução. `read_video` continua disponível para scripts que precisem dos frames em memória.
 
 ### 2. Deteção dos objetos
 
 O `Tracker`, em `trackers/tracker.py`, carrega `modelo/player.pt` e executa a deteção em lotes de **32 frames**, com um limiar de confiança de **0,1**.
 
-Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, as classes `player`, `goalkeeper` e `referee` são fundidas numa só classe de pessoa. As classes do modelo atual ainda não são fiáveis, e a fusão evita que um ID mude quando a classe oscila entre frames. A classe original fica guardada em `yolo_class`, apenas como pista.
+Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2]`. Os resultados são convertidos para o formato da biblioteca Supervision. Antes do tracking, as classes `player`, `goalkeeper` e `referee` são fundidas numa só classe de pessoa. As classes do modelo atual ainda não são fiáveis, e a fusão evita que um ID mude quando a classe oscila entre frames. A classe original fica guardada em `yolo_class`, apenas como pista. Como o NMS do YOLO é feito por classe, a mesma pessoa pode vir em duas caixas (por exemplo `player` e `goalkeeper`); depois da fusão aplica-se um segundo NMS (IoU 0,7) para eliminar esses duplicados.
 
 ### 3. Tracking entre frames
 
-O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado.
+O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado. O tracker usa os FPS do vídeo e lembra-se de uma pessoa perdida durante 90 frames (`lost_track_buffer`, 3,6 s a 25 fps). Desaparecimentos mais longos são tratados pelo ReID (secção 6.2).
 
 Os resultados são organizados por categoria, frame e ID:
 
@@ -70,7 +76,7 @@ tracks
 └── ball     → lista de frames → deteção da bola
 ```
 
-A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. No desenho do `main.py`, os jogadores recebem elipses e IDs com a cor da equipa, os árbitros recebem elipses amarelas e a bola é assinalada com um triângulo. A lista `referees` é preenchida pelo `TeamAssigner` (ver secção seguinte).
+A bola é guardada a partir das deteções com a chave fixa `1`; essa chave não representa uma identidade mantida pelo ByteTrack. Fica a deteção mais confiante do frame, com a confiança e a lista de todas as candidatas (para a limpeza da secção 6.3). No desenho do `main.py`, os jogadores recebem elipses e IDs com a cor da equipa, os árbitros recebem elipses amarelas e a bola é assinalada com um triângulo (verde se foi detetada, verde-claro se foi interpolada). O jogador com a bola recebe um triângulo vermelho. A lista `referees` é preenchida pelo `TeamAssigner` (ver secção seguinte).
 
 ### 4. Verificação do movimento da câmara
 
@@ -132,11 +138,40 @@ O resultado é uma posição `(x, y)` em metros, com origem no ponto de referên
 3. Calcula a cor mediana em LAB, dando menos peso à luminosidade para tolerar sombras.
 4. Agrupa as cores das tracks com KMeans (k=4). As duas equipas são os dois grupos com mais amostras e cores distintas; os centros são depois afinados sem os valores afastados.
 5. Cada track recebe a equipa mais votada nas suas amostras. Se a maioria estiver longe das duas equipas, a track é um "outro".
-6. Um "outro" junto a uma baliza (ou, sem homografia, marcado como `goalkeeper` pelo YOLO na maioria dos frames) é guarda-redes. A equipa é a que está, em média, mais perto dele frame a frame. Os restantes são árbitros e passam para `tracks["referees"]`.
+6. Um "outro" que é quase sempre a pessoa mais recuada do campo (atrás de pelo menos 90 % dos jogadores de campo em 60 % dos frames, ou em 30 % se o YOLO o marcar como `goalkeeper`) e não está junto à linha lateral é guarda-redes. Não se usa uma distância fixa à baliza, porque o guarda-redes sobe quando a equipa ataca. A equipa é a que está, em média, mais perto dele frame a frame. Os restantes são árbitros e passam para `tracks["referees"]`.
 
-Cada jogador fica com `team` (0 ou 1), `role` (`player`, `goalkeeper` ou `referee`) e `team_color` (a cor real da camisola, em BGR).
+Cada jogador fica com `team` (0 ou 1), `role` (`player`, `goalkeeper` ou `referee`) e `team_color` (a cor real da camisola, em BGR). A numeração das equipas é estável: segue o canal de cor (L, a ou b) em que as duas camisolas mais diferem.
+
+### 6.2. Reidentificação (ReID)
+
+Quando um jogador desaparece (oclusão ou saída de imagem) e volta, o ByteTrack dá-lhe um ID novo. `ReIdentifier`, em `reid/reid.py`, corre depois do `TeamAssigner` e junta essas tracks em cadeias, cada uma com um `global_id`:
+
+1. Constrói uma vista por track (`reid/tracklets.py`): primeiro e último frame, posições inicial e final em metros (mediana de 5 amostras) e a velocidade de saída (regressão linear nas últimas 10 posições, limitada a 8 m/s).
+2. Um par "A acaba → B começa" só é possível se as tracks forem da **mesma equipa e do mesmo papel**, se **B começar depois de A** (nunca coexistem) até 10 s depois, e se a **distância for fisicamente possível**: `|início(B) − previsão(A)| ≤ 2 m + 8 m/s × intervalo`. A previsão usa a velocidade de saída durante, no máximo, 1 s. Por usar metros, funciona com a câmara em movimento.
+3. Guarda-redes: sem limite de tempo, porque só há um por equipa.
+4. Sem homografia, só se aceitam intervalos até 1 s, com a distância em píxeis.
+5. As ligações são escolhidas em conjunto com o algoritmo húngaro (`scipy.optimize.linear_sum_assignment`). Uma ligação é rejeitada se houver outro candidato quase tão bom: é preferível um ID novo a trocar dois jogadores.
+
+O vídeo e o minimapa mostram o `global_id`; o ID do ByteTrack mantém-se como chave em `tracks`. No fim, o terminal apresenta um resumo por grupo (tracks, identidades e ligações). No vídeo de teste, o resultado é de 10 + 10 jogadores de campo, 1 + 1 guarda-redes e 3 árbitros.
 
 Os pés aproximam um ponto no plano do relvado, condição necessária para esta transformação. O centro do corpo ou uma bola no ar não pertencem a esse plano, pelo que a sua projeção não representa corretamente a posição no solo.
+
+### 6.3. Bola: limpeza, interpolação e posse
+
+`BallTracker`, em `ball/ball_tracker.py`:
+
+1. **Limpeza (antes da homografia, só em píxeis).** A trajetória é dividida em segmentos coerentes (deslocação até `30 px + 70 px × frames`). Segmentos de até 3 frames incoerentes com os vizinhos dos dois lados são falsos positivos e são removidos. Nos frames que ficam sem bola, aceita-se outra candidata do detetor se for coerente com os vizinhos. No vídeo de teste: 5 falsos positivos removidos (saltos de até 886 px num frame) e 2 recuperados.
+2. **Interpolação (depois da homografia).** Nas lacunas até 50 frames (2 s), assume-se que a bola se moveu a velocidade constante em linha reta. Se houver homografia em toda a lacuna, interpola-se em metros no campo e projeta-se para a imagem de cada frame, o que é correto mesmo com a câmara em movimento; senão, interpola-se em píxeis. Não se extrapola antes da primeira nem depois da última deteção. As posições criadas têm `interpolated=True` e `gap_frames`. No vídeo de teste, a bola passa de 592 para 750 frames.
+
+`PossessionAssigner`, em `ball/possession.py`, usa a distância dos pés de cada jogador à bola (em metros; sem homografia, em píxeis convertidos pela altura do jogador):
+
+- ninguém a menos de **2,5 m** → bola livre (passe ou remate): **mantém a posse anterior**;
+- jogadores das duas equipas dentro do raio, com distâncias a menos de **1 m** uma da outra → **disputada**;
+- caso contrário → equipa do jogador mais próximo, que fica com `has_ball=True`.
+
+Uma mudança de posse só é aceite se durar **5 frames seguidos**. As posições interpoladas em lacunas com mais de **8 frames** não mudam a posse: a bola falha sobretudo quando está tapada nos pés de um jogador, e aí o movimento real (receção, condução, passe) não é uma linha reta. A posição interpolada serve para desenhar, mas pode passar a 3–4 m de quem tem a bola.
+
+O vídeo mostra um painel com a posse atual e as percentagens acumuladas; o terminal mostra as percentagens finais. O raio de 2,5 m foi escolhido no vídeo de teste: com 1,5 m, a bola estava "livre" em 72 % dos frames (o jogador mais próximo está, em mediana, a 2,2 m, porque na condução a bola vai à frente do pé e a homografia tem erro).
 
 ### 7. Anotações e minimapa
 
@@ -152,7 +187,7 @@ As cores dos pontos correspondem às equipas; os árbitros aparecem a amarelo.
 
 ### 8. Exportação do vídeo
 
-O programa guarda os frames anotados em `output_videos/outputvideo.mp4`, usando o codec `mp4v` e os FPS obtidos na leitura. O resultado reúne o vídeo original, as anotações dos objetos e o minimapa.
+O programa escreve cada frame anotado em `output_videos/outputvideo.mp4` assim que é desenhado, usando o codec `mp4v` e os FPS obtidos na leitura. O resultado reúne o vídeo original, as anotações dos objetos e o minimapa.
 
 ## Execução por fases e exportação JSON
 
@@ -189,7 +224,7 @@ Quando não é possível projetar um jogador, `position_m` fica a `null`. O term
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install ultralytics "supervision<0.27" opencv-python numpy torch
+python -m pip install ultralytics "supervision<0.27" opencv-python numpy scipy torch
 ```
 
 ### Preparar os ficheiros
@@ -245,6 +280,17 @@ FutTrack/
 │   └── minimap.py             # Desenho do campo e posições projetadas
 ├── team_assigner/
 │   └── team_assigner.py       # Equipas, guarda-redes e árbitros pela cor
+├── reid/
+│   ├── tracklets.py           # Vista por track (início, fim, posições, velocidade)
+│   ├── reid.py                # Ligação de tracks da mesma pessoa (global_id)
+│   └── diagnostics.py         # Resumo de tracks e identidades por grupo
+├── ball/
+│   ├── ball_tracker.py        # Limpeza e interpolação da trajetória da bola
+│   ├── possession.py          # Posse de bola por frame
+│   └── drawing.py             # Painel de posse no vídeo
+├── tests/
+│   ├── test_reid.py           # Testes sintéticos do ReID (python -m pytest tests/)
+│   └── test_ball.py           # Testes sintéticos da bola e da posse
 ├── utils/
 │   ├── video_utils.py         # Leitura, escrita e deteção de movimento
 │   └── bbox_utils.py          # Operações auxiliares sobre bounding boxes
@@ -271,7 +317,7 @@ O dataset incluído identifica como origem o Football Players Detection, no Robo
 
 ## Limitações e próximos passos
 
-Os IDs representam trajetórias temporais, não a identidade real dos jogadores. Oclusões prolongadas, saídas de imagem e cortes de câmara podem causar perda ou troca de IDs.
+O `global_id` representa uma pessoa ao longo do vídeo, não a sua identidade real (nome ou número). O ReID usa apenas equipa, papel, tempo e posição: falha quando um jogador fica mais de 10 s fora de imagem, em cortes de câmara (repetições, grandes planos) e quando vários colegas desaparecem juntos no mesmo sítio (casos que deixa por ligar). Os próximos passos são acrescentar aparência (um modelo de ReID como o OSNet) e o número da camisola.
 
 A precisão depende da deteção dos pés, da qualidade e distribuição dos keypoints e da correspondência entre o campo real e o modelo geométrico. A inspeção do minimapa ajuda a identificar erros visuais, mas não substitui uma avaliação quantitativa. Este README não apresenta resultados validados de precisão em metros, qualidade de tracking ou velocidade de processamento.
 

@@ -5,9 +5,16 @@ import supervision as sv
 from utils import get_center_of_bbox, get_bbox_width
 
 class Tracker:
-    def __init__(self, model_path):
+    def __init__(self, model_path, fps=25, lost_track_buffer=90):
+        """lost_track_buffer: nº de frames durante os quais o ByteTrack se
+        lembra de uma pessoa perdida (90 frames = 3,6 s a 25 fps). O valor por
+        omissão do ByteTrack (30) só cobre oclusões de ~1 s.
+        """
         self.model = YOLO(model_path)
-        self.tracker = sv.ByteTrack(lost_track_buffer=90)
+        self.tracker = sv.ByteTrack(
+            lost_track_buffer=lost_track_buffer,
+            frame_rate=int(round(fps)) if fps else 25,
+        )
 
     def detect_track(self, frames):
         results=[]
@@ -80,49 +87,58 @@ class Tracker:
 
         return frame
 
-    def draw_annotations(self,video_frames, tracks):
-        output_video_frames= []
-        for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+    def draw_frame(self, frame, frame_num, tracks):
+        """Desenha as anotações de UM frame, diretamente sobre `frame`."""
+        player_dict = tracks["players"][frame_num]
+        ball_dict = tracks["ball"][frame_num]
+        referee_dict = tracks["referees"][frame_num]
 
-            player_dict = tracks["players"][frame_num]
-            ball_dict = tracks["ball"][frame_num]
-            referee_dict = tracks["referees"][frame_num]
+        # Jogadores: cor da equipa e global_id; quem tem a bola, triângulo vermelho.
+        for track_id, player in player_dict.items():
+            color = player.get("team_color", (0, 0, 255))
+            label = player.get("global_id", track_id)
+            frame = self.draw_ellipse(frame, player["bbox"], color, label)
+            if player.get("has_ball"):
+                frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
 
-            # Draw Players
-            for track_id, player in player_dict.items():
-                color = player.get("team_color",(0,0,255))
-                frame = self.draw_ellipse(frame, player["bbox"],color, track_id)
+        # Árbitros
+        for track_id, referee in referee_dict.items():
+            color = referee.get("team_color", (0, 255, 255))
+            frame = self.draw_ellipse(frame, referee["bbox"], color)
 
-            # Draw referees
-            for track_id, referee in referee_dict.items():
-                color = referee.get("team_color", (0, 255, 255))
-                frame = self.draw_ellipse(frame, referee["bbox"], color)
+        # Bola detetada: verde; posição interpolada: verde-claro.
+        for track_id, ball in ball_dict.items():
+            color = (170, 255, 170) if ball.get("interpolated") else (0, 255, 0)
+            frame = self.draw_traingle(frame, ball["bbox"], color)
+        return frame
 
-            # Draw ball 
-            for track_id, ball in ball_dict.items():
-                frame = self.draw_traingle(frame, ball["bbox"],(0,255,0))
-
-            output_video_frames.append(frame)
-
-        return output_video_frames
+    def draw_annotations(self, video_frames, tracks):
+        """Desenha todos os frames de uma lista (cria cópias; usa muita memória
+        em vídeos longos — o main.py usa draw_frame em streaming)."""
+        return [self.draw_frame(frame.copy(), frame_num, tracks)
+                for frame_num, frame in enumerate(video_frames)]
 
     
     def get_tracks(self, frames):
-        detections = self.detect_track(frames)
+        results = self.detect_track(frames)
+        detections = [sv.Detections.from_ultralytics(r) for r in results]
+        names = results[0].names if results else {}
+        return self.tracks_from_detections(detections, names)
 
+    def tracks_from_detections(self, detections, cls_names):
+        """Tracking a partir de deteções já calculadas (sv.Detections por frame).
+
+        Separado da deteção para poder repetir o tracking com outros
+        parâmetros sem voltar a correr o YOLO.
+        """
+        cls_names_inv = {v: k for k, v in cls_names.items()}
         tracks={
             "players":[],
             "referees":[],
             "ball":[]
         }
 
-        for frame_num, detection in enumerate(detections):
-            cls_names = detection.names
-            cls_names_inv = {v:k for k,v in cls_names.items()}
-
-            # Covert to supervision Detection format
-            detection_supervision = sv.Detections.from_ultralytics(detection)
+        for frame_num, detection_supervision in enumerate(detections):
 
             # Juntar jogador, guarda-redes e árbitro numa só classe "pessoa".
             # As classes do modelo ainda não são fiáveis; a distinção é feita
@@ -135,6 +151,14 @@ class Tracker:
             for object_ind, class_name in enumerate(yolo_classes):
                 if class_name in person_classes:
                     detection_supervision.class_id[object_ind] = cls_names_inv["player"]
+
+            # O NMS do YOLO é feito por classe: a mesma pessoa pode vir em duas
+            # caixas (p. ex. "player" e "goalkeeper"). Depois de fundir as
+            # classes, eliminar esses duplicados para não criar tracks duplas.
+            if len(detection_supervision) > 0:
+                detection_supervision = detection_supervision.with_nms(
+                    threshold=0.7, class_agnostic=False
+                )
 
             # Track Objects
             detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
@@ -154,10 +178,14 @@ class Tracker:
                         "yolo_class": frame_detection[5]["yolo_class"],
                     }
             
-            for frame_detection in detection_supervision:
-                bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[3]
-
-                if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {"bbox":bbox}
+            # Bola: guardar a deteção mais confiante e todas as candidatas
+            # (pode haver falsos positivos; o BallTracker escolhe a coerente).
+            candidates = [
+                {"bbox": d[0].tolist(), "confidence": float(d[2])}
+                for d in detection_supervision
+                if d[3] == cls_names_inv['ball']
+            ]
+            if candidates:
+                best = max(candidates, key=lambda c: c["confidence"])
+                tracks["ball"][frame_num][1] = {**best, "candidates": candidates}
         return tracks
