@@ -14,6 +14,7 @@ O projeto explora a ligação entre **deep learning, tracking de múltiplos obje
 - Deteção de 32 pontos de referência do campo e estimação de homografia com RANSAC.
 - Projeção dos pés dos jogadores para coordenadas em metros.
 - Verificação de movimento da câmara para decidir quando recalibrar no `main.py`.
+- Estabilização da homografia frame a frame e suavização das trajetórias, com velocidade de cada pessoa e posições estimadas quando sai de imagem.
 - Reidentificação de jogadores que desaparecem e voltam (`global_id`).
 - Limpeza de falsos positivos e interpolação da trajetória da bola.
 - Posse de bola por frame (equipa 0, equipa 1 ou disputada), com painel de percentagens no vídeo.
@@ -173,6 +174,23 @@ Uma mudança de posse só é aceite se durar **5 frames seguidos**. As posiçõe
 
 O vídeo mostra um painel com a posse atual e as percentagens acumuladas; o terminal mostra as percentagens finais. O raio de 2,5 m foi escolhido no vídeo de teste: com 1,5 m, a bola estava "livre" em 72 % dos frames (o jogador mais próximo está, em mediana, a 2,2 m, porque na condução a bola vai à frente do pé e a homografia tem erro).
 
+### 6.4. Estabilização da homografia e suavização das posições
+
+As posições brutas são demasiado ruidosas para calcular velocidades: no vídeo de teste, 14 % das velocidades frame a frame passavam de 11 m/s, com máximos de 419 m/s. Há dois tipos de erro, tratados em separado (módulo `positions/`).
+
+**1. Erro da homografia (comum a todos), em `positions/stabilizer.py`.** As posições estão em metros no campo, por isso o movimento da câmara não as devia mudar; quando todos os jogadores de um frame "saltam" juntos, o erro é da matriz desse frame (a câmara mexe-se quase sempre e a homografia é recalculada em 582 dos 750 frames). Para cada frame, estima-se com RANSAC a transformação de semelhança que leva as posições de todos os jogadores para uma referência robusta (a mediana da trajetória de cada um numa janela de ±12 e depois ±6 frames). Essa correção é aplicada à própria matriz, e as posições de jogadores e bola são recalculadas. Corre logo depois da análise, antes das equipas e do ReID. No vídeo de teste, o deslocamento comum no percentil 99 passou de 79 m/s para 21 m/s, com 142 frames corrigidos em mais de 0,5 m.
+
+**2. Erros de cada pessoa, em `positions/smoother.py`.** Corre depois do ReID, por `global_id`:
+
+- descarta as caixas cortadas pela borda da imagem (o "centro dos pés" desloca-se), exceto se uma track só tiver caixas na borda;
+- descarta saltos isolados com um filtro de Hampel (mais longe da mediana da janela de ±7 frames do que 3 desvios robustos ou 1 m);
+- preenche em linha reta os pontos descartados e as ausências entre tracks ligadas pelo ReID;
+- suaviza com um filtro Savitzky–Golay (janela de 1 s, grau 2), que dá também a velocidade.
+
+Cada pessoa medida fica com `position_smooth`, `speed_ms`, `speed_reliable` (falso na meia janela inicial e final de cada trajetória, onde a derivada é extrapolada) e `position_quality` (`measured`, `outlier` ou `border`). As posições nas ausências ficam em `tracks["estimated"][frame][global_id]`, com `estimated=True`. São desenhadas no minimapa como círculos vazios, mas **não devem entrar nas estatísticas físicas**: a linha reta subestima a distância e dá uma velocidade média artificial.
+
+Resultado no vídeo de teste: velocidade mediana de 2,5 m/s, percentil 99 de 8,3 m/s e máximo fiável de 10,9 m/s. Limitação: a linha reta só é razoável em ausências curtas; para ausências longas, o plano é deslocar o jogador com o bloco da equipa (posição relativa ao centro da equipa).
+
 ### 7. Anotações e minimapa
 
 `PitchMinimap`, em `homografia/minimap.py`, desenha o campo no canto inferior direito do vídeo e apresenta as posições projetadas com os respetivos IDs.
@@ -288,9 +306,13 @@ FutTrack/
 │   ├── ball_tracker.py        # Limpeza e interpolação da trajetória da bola
 │   ├── possession.py          # Posse de bola por frame
 │   └── drawing.py             # Painel de posse no vídeo
+├── positions/
+│   ├── stabilizer.py          # Correção da homografia frame a frame
+│   └── smoother.py            # Saltos, suavização, velocidade e ausências
 ├── tests/
 │   ├── test_reid.py           # Testes sintéticos do ReID (python -m pytest tests/)
-│   └── test_ball.py           # Testes sintéticos da bola e da posse
+│   ├── test_ball.py           # Testes sintéticos da bola e da posse
+│   └── test_positions.py      # Testes da estabilização e da suavização
 ├── utils/
 │   ├── video_utils.py         # Leitura, escrita e deteção de movimento
 │   └── bbox_utils.py          # Operações auxiliares sobre bounding boxes

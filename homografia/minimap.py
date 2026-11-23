@@ -11,7 +11,10 @@ class PitchMinimap:
         self.width = pitch.width / 100
 
     def overlay(self, frame, players, calibrated):
-        """players contém (ID de tracking, posição em metros[, cor BGR]).
+        """players contém (ID, posição em metros[, cor BGR[, estimada]]).
+
+        Posições estimadas (pessoa fora de imagem) são desenhadas como um
+        círculo vazio.
 
         Pontos fora do campo são contados, sem os prender às linhas do campo.
         """
@@ -55,7 +58,8 @@ class PitchMinimap:
         outside = 0
         for item in players:
             number, position = item[0], item[1]
-            color = item[2] if len(item) > 2 else (0, 220, 255)
+            color = item[2] if len(item) > 2 and item[2] is not None else (0, 220, 255)
+            estimated = len(item) > 3 and item[3]
             x, y = position
             if not np.isfinite(position).all() or not (
                 0 <= x <= self.length and 0 <= y <= self.width
@@ -63,8 +67,12 @@ class PitchMinimap:
                 outside += 1
                 continue
             location = pixel(position)
-            cv2.circle(panel, location, 5, (0, 0, 0), -1)
-            cv2.circle(panel, location, 4, color, -1)
+            if estimated:
+                cv2.circle(panel, location, 5, (0, 0, 0), 1)
+                cv2.circle(panel, location, 4, color, 1)
+            else:
+                cv2.circle(panel, location, 5, (0, 0, 0), -1)
+                cv2.circle(panel, location, 4, color, -1)
             cv2.putText(panel, str(number), (location[0] + 5, location[1] - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 

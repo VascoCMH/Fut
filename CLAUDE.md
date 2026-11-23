@@ -16,6 +16,7 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - `team_assigner/team_assigner.py`: equipas, guarda-redes e árbitros pela cor.
 - `reid/`: reidentificação (`global_id`) por equipa, tempo e posição em metros.
 - `ball/`: limpeza e interpolação da bola, posse de bola e painel.
+- `positions/`: estabilização da homografia e suavização das trajetórias.
 - `tests/`: testes sintéticos do ReID e da bola (`python -m pytest tests/`).
 - `homografia/`: calibração (`homografia.py`), geometria do campo 120×70 m
   (`football_pitch.py`), minimapa (`minimap.py`).
@@ -58,6 +59,15 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   homografia, e as posições da bola são recalculadas com as matrizes guardadas.
   Painel de posse recebe contagens acumuladas (não a lista: seria O(n²)).
   Não voltar a guardar listas de frames no `main.py`.
+- **Posições**: o ruído bruto era enorme (14 % das velocidades >11 m/s).
+  (1) `HomographyStabilizer` logo após a análise: por frame, semelhança
+  RANSAC das posições para a mediana temporal de cada pessoa → corrige a
+  MATRIZ (não as posições) e reprojeta tudo. (2) `PositionSmoother` depois do
+  ReID, por global_id: descarta caixas na borda (exceto se a track só tiver
+  dessas) e saltos (Hampel ±7, max(3σ,1 m)); linha reta nos buracos e nas
+  ausências ligadas; Savitzky–Golay 1 s grau 2 → position_smooth/speed_ms.
+  speed_reliable=False nas pontas (derivada extrapolada). Posições estimadas
+  em tracks["estimated"]: minimapa (círculo vazio) sim, estatísticas NÃO.
 - Cores no desenho: cor real da camisola da equipa; árbitros a amarelo;
   sem equipa a cinzento.
 
@@ -92,7 +102,23 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - Feito: `main.py` em streaming; mesmos resultados no vídeo de teste; pico
   de memória 3,5 GB (antes ~9 GB), cresce ~0,2 GB por 750 frames. Tempo em
   CPU: 563 s para 30 s de vídeo (5 min em CPU ≈ 1,5 h; com GPU muito menos).
+- Feito: estabilização + suavização: velocidade fiável med 2,5 / p99 8,3 /
+  máx 10,9 m/s; 142 frames corrigidos; GR fora de imagem estimado no minimapa.
+  Posse continua a usar position_m (não a suavizada) — mesmos resultados.
+- Feito: o `main.py` imprime no fim o tempo de cada etapa e o dispositivo da
+  deteção (cpu/cuda). Aqui (CPU, 30 s de vídeo): homografia 331 s (63 %,
+  583 chamadas), YOLO 169 s (32 %), desenho 14 s, movimento da câmara 10 s,
+  equipas+ReID+bola+posições (incl. estabilização e suavização) 2,2 s.
+  O Vasco reportou 1 min → 10 min depois da suavização; aqui as etapas
+  novas custam ~2,6 s. À espera do relatório de tempos do PC dele.
 - Por fazer / ideias:
+  - Acelerar a homografia: ajustar a matriz anterior com o movimento da
+    câmara (já calculado em camera_moved) e só recalibrar com o modelo em
+    movimentos grandes ou periodicamente.
+  - Ausências longas: deslocar o jogador com o bloco da equipa (posição
+    relativa ao centro), em vez da linha reta. Depende do ReID novo.
+  - Estatísticas físicas (distância, sprints, mapas de calor) com
+    position_smooth e só speed_reliable + measured.
   - Posse: validar com anotação manual de alguns segundos; usar a velocidade
     da bola para distinguir passe de condução; bola no ar (a projeção para
     metros só vale com a bola no chão).
@@ -126,3 +152,5 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   `lost_track_buffer=90`) no branch; conflitos resolvidos (`.gitignore` do
   Vasco; `Tracker` parametrizado com 90 por defeito). ReID atual NÃO serve
   para um jogo completo (limite de 10 s, cortes de câmara, escala das tracks).
+- 2026-11-23: `positions/` (estabilização da homografia e suavização, com a
+  ideia do Vasco de remover saltos e ligar ausências em linha reta).
