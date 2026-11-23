@@ -18,6 +18,7 @@ from homografia.minimap import PitchMinimap
 from team_assigner import TeamAssigner
 from reid import ReIdentifier, summarize
 from ball import BallTracker, PossessionAssigner, draw_possession
+from positions import HomographyStabilizer, PositionSmoother
 
 VIDEO_PATH = "input_videos/inputvideo.mp4"
 OUTPUT_PATH = "output_videos/outputvideo.mp4"
@@ -26,7 +27,7 @@ BATCH_SIZE = 32
 
 def analyse(video_path):
     """Passagem 1: devolve tracks, matrizes de homografia e o TeamAssigner."""
-    fps, total, _, _ = video_info(video_path)
+    fps, total, width, height = video_info(video_path)
     tracker = Tracker("modelo/player.pt", fps=fps)
     homography = Homography(model_path="modelo/pitch.pt")
     team_assigner = TeamAssigner()
@@ -60,17 +61,28 @@ def analyse(video_path):
             team_assigner.add_frame(frame_index, frame, tracks["players"][frame_index])
             frame_index += 1
         print(f"Análise: {frame_index}/{total} frames", flush=True)
-    return fps, tracker, homography, team_assigner, tracks, matrices
+    return fps, (width, height), tracker, homography, team_assigner, tracks, matrices
 
 
 def main():
-    fps, tracker, homography, team_assigner, tracks, matrices = analyse(VIDEO_PATH)
+    fps, frame_size, tracker, homography, team_assigner, tracks, matrices = analyse(VIDEO_PATH)
 
-    ##BOLA (remove falsos positivos e recalcula as posições em metros)###
+    ##ESTABILIZAÇÃO (corrige o erro da homografia comum a todos os jogadores)###
+    stabilizer = HomographyStabilizer(frame_size=frame_size)
+    matrices = stabilizer.stabilize(tracks, matrices)
+    corrected = sum(c > 0.5 for c in stabilizer.corrections)
+    print(f"Homografia: {corrected} frames corrigidos em mais de 0,5 m")
+
+    ##BOLA (remove falsos positivos)###
     ball_tracker = BallTracker()
     ball_tracker.clean(tracks["ball"])
+
+    # Recalcular todas as posições em metros com as matrizes corrigidas.
     for frame_index, matrix in enumerate(matrices):
-        homography.update_tracks(matrix, {"ball": tracks["ball"][frame_index]})
+        homography.update_tracks(matrix, {
+            category: category_tracks[frame_index]
+            for category, category_tracks in tracks.items()
+        })
 
     ##EQUIPAS (separa equipas, guarda-redes e árbitros pela cor da camisola)###
     team_assigner.assign(None, tracks, homography.pitch)
@@ -79,6 +91,13 @@ def main():
     reidentifier = ReIdentifier(fps=fps)
     reidentifier.assign(tracks)
     print("\n".join(summarize(reidentifier)))
+
+    ##SUAVIZAÇÃO (remove saltos, suaviza e estima as ausências em linha reta)###
+    smoother = PositionSmoother(fps=fps, frame_size=frame_size)
+    smoother.smooth(tracks)
+    print(f"Posições: {smoother.outliers} saltos e {smoother.border} caixas "
+          f"cortadas pela borda descartados; {smoother.estimated} posições "
+          f"estimadas em ausências")
 
     ##BOLA (preenche lacunas em linha reta, em metros, e calcula a posse)###
     ball_tracker.interpolate(tracks["ball"], matrices)
@@ -102,11 +121,16 @@ def main():
             break
         tracker.draw_frame(frame, frame_index, tracks)
         people = [
-            (person.get("global_id", track_id), person["position_m"],
-             person.get("team_color", (0, 220, 255)))
+            (person.get("global_id", track_id),
+             person.get("position_smooth") or person["position_m"],
+             person.get("team_color", (0, 220, 255)), False)
             for category in ("players", "referees")
             for track_id, person in tracks[category][frame_index].items()
             if person["position_m"] is not None
+        ]
+        people += [
+            (gid, person["position_smooth"], person.get("team_color"), True)
+            for gid, person in tracks["estimated"][frame_index].items()
         ]
         minimap.overlay(frame, people, matrices[frame_index] is not None)
         current = possession.possession[frame_index]
