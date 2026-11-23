@@ -105,7 +105,16 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - Feito: estabilização + suavização: velocidade fiável med 2,5 / p99 8,3 /
   máx 10,9 m/s; 142 frames corrigidos; GR fora de imagem estimado no minimapa.
   Posse continua a usar position_m (não a suavizada) — mesmos resultados.
+- Feito: o `main.py` imprime no fim o tempo de cada etapa e o dispositivo da
+  deteção (cpu/cuda). Aqui (CPU, 30 s de vídeo): homografia 331 s (63 %,
+  583 chamadas), YOLO 169 s (32 %), desenho 14 s, movimento da câmara 10 s,
+  equipas+ReID+bola+posições (incl. estabilização e suavização) 2,2 s.
+  O Vasco reportou 1 min → 10 min depois da suavização; aqui as etapas
+  novas custam ~2,6 s. À espera do relatório de tempos do PC dele.
 - Por fazer / ideias:
+  - Acelerar a homografia: ajustar a matriz anterior com o movimento da
+    câmara (já calculado em camera_moved) e só recalibrar com o modelo em
+    movimentos grandes ou periodicamente.
   - Ausências longas: deslocar o jogador com o bloco da equipa (posição
     relativa ao centro), em vez da linha reta. Depende do ReID novo.
   - Estatísticas físicas (distância, sprints, mapas de calor) com

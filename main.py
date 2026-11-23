@@ -11,7 +11,7 @@ from collections import Counter
 
 import cv2
 
-from utils import camera_moved, iter_batches, iter_frames, video_info
+from utils import Timings, camera_moved, iter_batches, iter_frames, video_info
 from trackers import Tracker
 from homografia import Homography
 from homografia.minimap import PitchMinimap
@@ -23,6 +23,7 @@ from positions import HomographyStabilizer, PositionSmoother
 VIDEO_PATH = "input_videos/inputvideo.mp4"
 OUTPUT_PATH = "output_videos/outputvideo.mp4"
 BATCH_SIZE = 32
+timings = Timings()
 
 
 def analyse(video_path):
@@ -38,15 +39,19 @@ def analyse(video_path):
     frame_index = 0
     for batch in iter_batches(video_path, BATCH_SIZE):
         ##TRACKING (o mesmo tracker mantém o estado entre lotes)###
-        batch_tracks = tracker.get_tracks(batch)
+        with timings.measure("Deteção + tracking (YOLO)"):
+            batch_tracks = tracker.get_tracks(batch)
         for category in tracks:
             tracks[category].extend(batch_tracks[category])
 
         for frame in batch:
             ##HOMOGRAPHY (recalibra só quando a câmara se mexe)###
-            if matrix is None or camera_moved(reference_frame, frame):
+            with timings.measure("Movimento da câmara"):
+                moved = matrix is None or camera_moved(reference_frame, frame)
+            if moved:
                 try:
-                    matrix = homography.get_matrix(frame)
+                    with timings.measure("Homografia (modelo do campo)"):
+                        matrix = homography.get_matrix(frame)
                     reference_frame = frame
                 except ValueError as error:
                     print(f"Frame {frame_index + 1}: {error}")
@@ -58,14 +63,17 @@ def analyse(video_path):
             })
 
             ##EQUIPAS (recolhe as cores das camisolas deste frame)###
-            team_assigner.add_frame(frame_index, frame, tracks["players"][frame_index])
+            with timings.measure("Cores das camisolas"):
+                team_assigner.add_frame(frame_index, frame, tracks["players"][frame_index])
             frame_index += 1
         print(f"Análise: {frame_index}/{total} frames", flush=True)
+    print(f"Deteção a correr em: {tracker.model.device}")
     return fps, (width, height), tracker, homography, team_assigner, tracks, matrices
 
 
 def main():
     fps, frame_size, tracker, homography, team_assigner, tracks, matrices = analyse(VIDEO_PATH)
+    timings.start("Equipas, ReID, bola, posições")
 
     ##ESTABILIZAÇÃO (corrige o erro da homografia comum a todos os jogadores)###
     stabilizer = HomographyStabilizer(frame_size=frame_size)
@@ -110,7 +118,10 @@ def main():
     print(f"Posse: equipa 0 {stats[0]:.0f}% | equipa 1 {stats[1]:.0f}% | "
           f"disputada {stats['disputed']:.0f}%")
 
+    timings.stop("Equipas, ReID, bola, posições")
+
     ##DESENHO (passagem 2: lê, desenha e escreve frame a frame)###
+    timings.start("Desenho e escrita do vídeo")
     _, total, width, height = video_info(VIDEO_PATH)
     writer = cv2.VideoWriter(OUTPUT_PATH, cv2.VideoWriter_fourcc(*"mp4v"),
                              fps, (width, height))
@@ -141,7 +152,9 @@ def main():
         if (frame_index + 1) % 500 == 0:
             print(f"Desenho: {frame_index + 1}/{total} frames", flush=True)
     writer.release()
+    timings.stop("Desenho e escrita do vídeo")
     print(f"Vídeo guardado em {OUTPUT_PATH}")
+    print(timings.report(video_seconds=len(tracks["players"]) / fps if fps else None))
 
 
 if __name__ == "__main__":
