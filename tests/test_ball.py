@@ -8,6 +8,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ball import DISPUTED, BallTracker, PossessionAssigner  # noqa: E402
+from game import Game  # noqa: E402
 
 
 def ball_box(x, y, size=14):
@@ -113,14 +114,16 @@ def test_interpolates_in_metres_with_moving_camera():
 def tracks_with(ball_positions, players):
     """ball_positions: lista de (x, y) metros ou None; players: {id: (team, [pos por frame])}."""
     n = len(ball_positions)
-    tracks = {"players": [{} for _ in range(n)], "ball": [{} for _ in range(n)]}
+    tracks = {"players": [{} for _ in range(n)], "referees": [{} for _ in range(n)],
+              "ball": [{} for _ in range(n)]}
     for f, pos in enumerate(ball_positions):
         if pos is not None:
             tracks["ball"][f][1] = {"bbox": [0, 0, 1, 1], "position_m": list(pos)}
     for track_id, (team, positions) in players.items():
         for f, pos in enumerate(positions):
             tracks["players"][f][track_id] = {"bbox": [0, 0, 1, 1], "team": team,
-                                              "position_m": list(pos)}
+                                              "position_m": list(pos),
+                                              "global_id": track_id}
     return tracks
 
 
@@ -134,13 +137,16 @@ def test_possession_team_disputed_and_free_keeps_last():
         4: (1, [(19.6, 10)] * n),
     }
     tracks = tracks_with(ball, players)
+    game = Game.from_tracks(tracks, 25)
     pa = PossessionAssigner(min_frames=3)
-    possession = pa.assign(tracks)
+    possession = pa.assign(game, tracks["ball"])
     assert possession[5] == 0
     assert possession[15] == DISPUTED
     assert possession[25] == DISPUTED   # bola livre em x=30: mantém o anterior
     assert possession[35] == 1
-    assert tracks["players"][5][1].get("has_ball")
+    assert game.possession == possession
+    assert game.ball_holder[5] == 1 and game.ball_holder[15] is None
+    assert [p.has_ball for p in game.positions_at(5) if p.global_id == 1] == [True]
     stats = pa.statistics()
     assert abs(sum(stats.values()) - 100) < 1e-6
 
@@ -151,13 +157,14 @@ def test_possession_ignores_short_flicker():
     team0 = [(10.5, 10)] * n
     team1 = [(30, 10)] * 14 + [(10.2, 10)] * 2 + [(30, 10)] * 14  # 2 frames perto
     tracks = tracks_with(ball, {1: (0, team0), 2: (1, team1)})
-    possession = PossessionAssigner(min_frames=5).assign(tracks)
+    possession = PossessionAssigner(min_frames=5).assign(
+        Game.from_tracks(tracks, 25), tracks["ball"])
     assert set(possession) == {0}
 
 
 def test_no_ball_means_no_possession():
     tracks = tracks_with([None] * 5, {1: (0, [(10, 10)] * 5)})
-    assert PossessionAssigner().assign(tracks) == [None] * 5
+    assert PossessionAssigner().assign(Game.from_tracks(tracks, 25), tracks["ball"]) == [None] * 5
 
 
 def test_long_gap_interpolation_does_not_change_possession():
@@ -167,5 +174,6 @@ def test_long_gap_interpolation_does_not_change_possession():
                                 2: (1, [(40, 10)] * 10 + [(10.5, 10)] * 20)})
     for f in range(10, n):  # lacuna longa, interpolada, junto ao jogador 2
         tracks["ball"][f][1].update(interpolated=True, gap_frames=20)
-    possession = PossessionAssigner(min_frames=3, max_trusted_gap=8).assign(tracks)
+    possession = PossessionAssigner(min_frames=3, max_trusted_gap=8).assign(
+        Game.from_tracks(tracks, 25), tracks["ball"])
     assert set(possession) == {0}

@@ -7,6 +7,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from game import Game  # noqa: E402
 from positions import HomographyStabilizer, PositionSmoother, hampel_outliers  # noqa: E402
 
 FPS = 25
@@ -78,48 +79,59 @@ def test_hampel_flags_isolated_spike():
     assert bad[15] and bad.sum() == 1
 
 
+def smoothed(tracks, **options):
+    """Converte para o Game (como no main.py) e suaviza."""
+    game = Game.from_tracks(tracks, FPS)
+    PositionSmoother(fps=FPS, **options).smooth(game)
+    return game
+
+
+def at(game, gid, frame):
+    """Estado da pessoa `gid` no frame (PersonState) ou None."""
+    return next((p for p in game.positions_at(frame) if p.global_id == gid), None)
+
+
 def test_constant_speed_is_recovered():
-    tracks = make_tracks(100, {1: (1, 0, linear((10, 20), (3, 4)))})  # 5 m/s
-    PositionSmoother(fps=FPS).smooth(tracks)
-    speeds = [tracks["players"][f][1]["speed_ms"] for f in range(100)]
-    assert np.allclose(speeds, 5.0, atol=0.05)
-    reliable = [tracks["players"][f][1]["speed_reliable"] for f in range(100)]
-    assert not reliable[0] and not reliable[99] and all(reliable[12:88])
+    game = smoothed(make_tracks(100, {1: (1, 0, linear((10, 20), (3, 4)))}))  # 5 m/s
+    player = game.players[1]
+    assert np.allclose(player.speed, 5.0, atol=0.05)
+    assert not player.speed_reliable[0] and not player.speed_reliable[99]
+    assert player.speed_reliable[12:88].all()
 
 
 def test_spike_is_removed_from_smoothed_path():
     path = linear((10, 20), (2, 0))
     tracks = make_tracks(60, {1: (1, 0, path)})
     tracks["players"][30][1]["position_m"] = [40.0, 45.0]  # salto de ~30 m
-    PositionSmoother(fps=FPS).smooth(tracks)
-    person = tracks["players"][30][1]
-    assert person["position_quality"] == "outlier"
-    assert np.allclose(person["position_smooth"], path(30), atol=0.05)
-    assert max(tracks["players"][f][1]["speed_ms"] for f in range(60)) < 2.1
+    game = smoothed(tracks)
+    person = at(game, 1, 30)
+    assert person.quality == "outlier"
+    assert np.allclose(person.position, path(30), atol=0.05)
+    assert game.players[1].speed.max() < 2.1
 
 
 def test_gap_between_linked_tracks_is_filled_in_straight_line():
     # O mesmo jogador (global_id 7) em duas tracks do ByteTrack, com 30 frames
     # sem ser visto entre elas.
-    tracks = make_tracks(130, {
+    game = smoothed(make_tracks(130, {
         1: (7, 0, linear((10, 20), (5, 0), frames=range(0, 50))),
         2: (7, 0, linear((10, 20), (5, 0), frames=range(80, 130))),
-    })
-    PositionSmoother(fps=FPS).smooth(tracks)
+    }))
     for f in range(50, 80):
-        entry = tracks["estimated"][f][7]
-        assert entry["estimated"] and entry["gap_frames"] == 30
-        assert np.allclose(entry["position_smooth"], (10 + 5 * f / FPS, 20), atol=0.05)
-    assert 7 not in tracks["estimated"][20] and 7 not in tracks["estimated"][100]
+        person = at(game, 7, f)
+        assert person.estimated and person.bbox is None and person.track_id is None
+        assert np.allclose(person.position, (10 + 5 * f / FPS, 20), atol=0.05)
+    assert not at(game, 7, 20).estimated and not at(game, 7, 100).estimated
+    # A ficha fica com todos os frames, medidos e estimados, por ordem.
+    assert list(game.players[7].frames) == list(range(130))
 
 
 def test_max_gap_limits_estimation():
-    tracks = make_tracks(200, {
+    game = smoothed(make_tracks(200, {
         1: (7, 0, linear((10, 20), (1, 0), frames=range(0, 50))),
         2: (7, 0, linear((10, 20), (1, 0), frames=range(150, 200))),
-    })
-    PositionSmoother(fps=FPS, max_gap_s=2.0).smooth(tracks)  # ausência de 4 s
-    assert all(7 not in tracks["estimated"][f] for f in range(50, 150))
+    }), max_gap_s=2.0)  # ausência de 4 s
+    assert all(at(game, 7, f) is None for f in range(50, 150))
 
 
 def test_boxes_cut_by_the_border_are_not_trusted():
@@ -128,10 +140,10 @@ def test_boxes_cut_by_the_border_are_not_trusted():
     # Frame 30: caixa cortada na borda esquerda e posição errada.
     tracks["players"][30][1]["bbox"][0] = 0
     tracks["players"][30][1]["position_m"] = [13.0, 23.0]
-    PositionSmoother(fps=FPS, frame_size=(1920, 1080)).smooth(tracks)
-    person = tracks["players"][30][1]
-    assert person["position_quality"] == "border"
-    assert np.allclose(person["position_smooth"], path(30), atol=0.05)
+    game = smoothed(tracks, frame_size=(1920, 1080))
+    person = at(game, 1, 30)
+    assert person.quality == "border"
+    assert np.allclose(person.position, path(30), atol=0.05)
 
 
 def test_track_with_only_border_boxes_still_anchors_a_gap():
@@ -142,5 +154,31 @@ def test_track_with_only_border_boxes_still_anchors_a_gap():
     })
     for f in range(0, 15):
         tracks["players"][f][1]["bbox"][0] = 0
-    PositionSmoother(fps=FPS, frame_size=(1920, 1080)).smooth(tracks)
-    assert all(20 in tracks["estimated"][f] for f in range(15, 115))
+    game = smoothed(tracks, frame_size=(1920, 1080))
+    assert all(at(game, 20, f).estimated for f in range(15, 115))
+
+
+# ------------------------------------------------------------------- Game
+def test_game_groups_tracks_by_global_id_and_keeps_fixed_data_once():
+    tracks = make_tracks(100, {
+        1: (7, 1, linear((10, 20), (1, 0), frames=range(0, 40))),
+        2: (7, 1, linear((10, 20), (1, 0), frames=range(60, 100))),
+        3: (9, 0, linear((50, 30), (0, 0))),
+    })
+    game = Game.from_tracks(tracks, FPS)
+    assert set(game.players) == {7, 9}
+    seven = game.players[7]
+    assert seven.team == 1 and seven.role == "player"
+    assert list(seven.track_ids[:40]) == [1] * 40 and list(seven.track_ids[40:]) == [2] * 40
+    assert [p.global_id for p in game.positions_at(50)] == [9]
+
+
+def test_csv_has_one_row_per_person_and_frame(tmp_path):
+    game = smoothed(make_tracks(30, {1: (1, 0, linear((10, 20), (1, 0)))}))
+    game.ball_holder[5] = 1
+    game.possession[5] = 0
+    path = game.to_csv(tmp_path / "posicoes.csv")
+    lines = open(path, encoding="utf-8").read().splitlines()
+    assert lines[0].startswith("frame,time_s,global_id,team,role,quality,x,y")
+    assert len(lines) == 31
+    assert lines[6].split(",")[-2:] == ["True", "0"]

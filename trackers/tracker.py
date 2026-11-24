@@ -87,35 +87,41 @@ class Tracker:
 
         return frame
 
-    def draw_frame(self, frame, frame_num, tracks):
-        """Desenha as anotações de UM frame, diretamente sobre `frame`."""
-        player_dict = tracks["players"][frame_num]
-        ball_dict = tracks["ball"][frame_num]
-        referee_dict = tracks["referees"][frame_num]
+    def draw_frame(self, frame, people, ball_dict):
+        """Desenha as anotações de UM frame, diretamente sobre `frame`.
+
+        people: lista de PersonState do frame (game.positions_at); as pessoas
+        estimadas (fora de imagem) são ignoradas. ball_dict: tracks["ball"][f].
+        """
+        visible = [p for p in people if not p.estimated]
 
         # Jogadores: cor da equipa e global_id; quem tem a bola, triângulo vermelho.
-        for track_id, player in player_dict.items():
-            color = player.get("team_color", (0, 0, 255))
-            label = player.get("global_id", track_id)
-            frame = self.draw_ellipse(frame, player["bbox"], color, label)
-            if player.get("has_ball"):
-                frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
+        for player in visible:
+            if player.role == "referee":
+                continue
+            color = player.color if player.color is not None else (0, 0, 255)
+            frame = self.draw_ellipse(frame, player.bbox, color, player.global_id)
+            if player.has_ball:
+                frame = self.draw_traingle(frame, player.bbox, (0, 0, 255))
 
         # Árbitros
-        for track_id, referee in referee_dict.items():
-            color = referee.get("team_color", (0, 255, 255))
-            frame = self.draw_ellipse(frame, referee["bbox"], color)
+        for referee in visible:
+            if referee.role != "referee":
+                continue
+            color = referee.color if referee.color is not None else (0, 255, 255)
+            frame = self.draw_ellipse(frame, referee.bbox, color)
 
         # Bola detetada: verde; posição interpolada: verde-claro.
-        for track_id, ball in ball_dict.items():
+        for ball in ball_dict.values():
             color = (170, 255, 170) if ball.get("interpolated") else (0, 255, 0)
             frame = self.draw_traingle(frame, ball["bbox"], color)
         return frame
 
-    def draw_annotations(self, video_frames, tracks):
+    def draw_annotations(self, video_frames, game, ball_tracks):
         """Desenha todos os frames de uma lista (cria cópias; usa muita memória
         em vídeos longos — o main.py usa draw_frame em streaming)."""
-        return [self.draw_frame(frame.copy(), frame_num, tracks)
+        return [self.draw_frame(frame.copy(), game.positions_at(frame_num),
+                                ball_tracks[frame_num])
                 for frame_num, frame in enumerate(video_frames)]
 
     

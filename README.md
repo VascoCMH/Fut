@@ -68,7 +68,7 @@ Cada deteção contém uma classe e uma bounding box no formato `[x1, y1, x2, y2
 
 O ByteTrack associa as deteções ao longo do vídeo e atribui IDs a todas as pessoas. O objetivo é manter uma referência temporal ao mesmo objeto enquanto este permanece acompanhado. O tracker usa os FPS do vídeo e lembra-se de uma pessoa perdida durante 90 frames (`lost_track_buffer`, 3,6 s a 25 fps). Desaparecimentos mais longos são tratados pelo ReID (secção 6.2).
 
-Os resultados são organizados por categoria, frame e ID:
+Durante a análise do vídeo, os resultados são organizados por categoria, frame e ID (o formato natural do tracking, que vê um frame de cada vez). Depois do ReID são convertidos para o `Game` (secção 6.5):
 
 ```text
 tracks
@@ -191,6 +191,31 @@ Cada pessoa medida fica com `position_smooth`, `speed_ms`, `speed_reliable` (fal
 
 Resultado no vídeo de teste: velocidade mediana de 2,5 m/s, percentil 99 de 8,3 m/s e máximo fiável de 10,9 m/s. Limitação: a linha reta só é razoável em ausências curtas; para ausências longas, o plano é deslocar o jogador com o bloco da equipa (posição relativa ao centro da equipa).
 
+### 6.5. Estrutura dos dados: `Game` e `PlayerTrack`
+
+Depois do ReID, o `main.py` converte o formato por frame (`tracks["players"]` e `tracks["referees"]`) numa estrutura organizada **por pessoa**, no módulo `game/`. A partir daí, a suavização, a posse, o desenho e a exportação usam só esta estrutura, e os dicionários por frame são apagados.
+
+**`PlayerTrack` (`game/player_track.py`): a ficha de uma pessoa** (jogador, guarda-redes ou árbitro). O que é fixo fica guardado uma só vez (`global_id`, `team`, `role`, `color`). O que muda fica em arrays numpy do mesmo tamanho, um elemento por frame em que a pessoa existe:
+
+| Array | Conteúdo |
+| --- | --- |
+| `frames` | Números dos frames |
+| `x`, `y` | Posição suavizada (m) |
+| `x_raw`, `y_raw` | Posição medida (m); `NaN` sem medição |
+| `speed`, `speed_reliable` | Velocidade (m/s) e se é fiável |
+| `quality` | `measured`, `outlier`, `border`, `estimated` ou `uncalibrated` |
+| `bbox`, `track_ids` | Caixa em píxeis e ID do ByteTrack (vazios quando estimada) |
+
+Os frames em que a pessoa esteve fora de imagem fazem parte da mesma ficha, com `quality = "estimated"`.
+
+**`Game` (`game/game.py`): o jogo.** Guarda as fichas (`players`, por `global_id`) e os dados do jogo por frame que não pertencem a nenhuma pessoa: `possession` (equipa com a posse) e `ball_holder` (`global_id` de quem tem a bola). Não há informação repetida: "este jogador tem a bola?" consulta-se em `ball_holder`, e a equipa de cada jogador está só na ficha dele.
+
+- `game.players[7].x` dá a trajetória completa do jogador 7;
+- `game.positions_at(300)` dá a lista das pessoas no frame 300 (usada pela posse e pelo desenho);
+- `game.to_csv(path)` exporta uma linha por pessoa e por frame. O `main.py` grava `output_videos/posicoes.csv`, que pode ser aberto no Excel.
+
+A bola continua organizada por frame (`tracks["ball"]`).
+
 ### 7. Anotações e minimapa
 
 `PitchMinimap`, em `homografia/minimap.py`, desenha o campo no canto inferior direito do vídeo e apresenta as posições projetadas com os respetivos IDs.
@@ -306,6 +331,9 @@ FutTrack/
 │   ├── ball_tracker.py        # Limpeza e interpolação da trajetória da bola
 │   ├── possession.py          # Posse de bola por frame
 │   └── drawing.py             # Painel de posse no vídeo
+├── game/
+│   ├── player_track.py        # Ficha de uma pessoa (arrays por frame)
+│   └── game.py                # Fichas + posse por frame; vista por frame; CSV
 ├── positions/
 │   ├── stabilizer.py          # Correção da homografia frame a frame
 │   └── smoother.py            # Saltos, suavização, velocidade e ausências
