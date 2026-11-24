@@ -1,4 +1,4 @@
-"""Suavização das trajetórias de cada pessoa (por global_id).
+"""Suavização das trajetórias de cada pessoa (ficha PlayerTrack do Game).
 
 1. Medições suspeitas: caixas cortadas pela borda da imagem (o "centro dos
    pés" desloca-se) e saltos isolados (filtro de Hampel: mais longe da
@@ -9,16 +9,17 @@
 3. Filtro Savitzky–Golay (janela de ~1 s, polinómio de grau 2) sobre a
    trajetória contínua, que dá também a velocidade (derivada).
 
-Resultado:
-- (uma track só com caixas na borda usa-as na mesma, para não perder o
-  ponto de partida de uma ausência)
-- em cada pessoa medida: position_smooth, speed_ms, speed_reliable e
-  position_quality ("measured", "outlier" ou "border");
+Uma track (do ByteTrack) só com caixas na borda usa-as na mesma, para não
+perder o ponto de partida de uma ausência.
+
+Resultado, nos arrays de cada PlayerTrack:
+- x, y (posição suavizada), speed, speed_reliable e quality ("measured",
+  "outlier", "border" ou "uncalibrated");
 - speed_reliable=False na meia janela inicial e final de cada trajetória: aí
   o filtro não tem frames de um dos lados e a derivada é extrapolada (no
   vídeo de teste dava 14 m/s ao guarda-redes a entrar em imagem);
-- tracks["estimated"][frame][global_id]: posições estimadas nos frames em que
-  a pessoa não foi vista (ausências ligadas pelo ReID), com estimated=True.
+- frames novos com quality="estimated" nos frames em que a pessoa não foi
+  vista (ausências ligadas pelo ReID).
   Servem para o minimapa, NÃO para estatísticas físicas: a linha reta
   subestima a distância e dá uma velocidade média artificial.
 
@@ -26,14 +27,14 @@ No vídeo de teste: velocidade bruta frame a frame com 14 % dos valores acima
 de 11 m/s; depois da estabilização e desta suavização, 0 %.
 """
 
-from collections import defaultdict
-
 import numpy as np
 from scipy.signal import savgol_filter
 
+from game.player_track import BORDER, ESTIMATED, MEASURED, OUTLIER, UNCALIBRATED
 from .stabilizer import touches_border
 
-CATEGORIES = ("players", "referees")
+# Os estimados são desenhados depois de todas as pessoas medidas do frame.
+ESTIMATED_ORDER = 1_000_000
 
 
 def hampel_outliers(frames, points, half=7, min_deviation=1.0, n_sigmas=3.0):
@@ -68,18 +69,6 @@ class PositionSmoother:
         self.border = 0
         self.estimated = 0
 
-    def _trajectories(self, tracks):
-        """{global_id: [(frame, categoria, track_id, pessoa), ...]}"""
-        people = defaultdict(list)
-        for category in CATEGORIES:
-            for frame_num, frame in enumerate(tracks[category]):
-                for track_id, person in frame.items():
-                    gid = person.get("global_id", track_id)
-                    people[gid].append((frame_num, category, track_id, person))
-        for items in people.values():
-            items.sort(key=lambda item: item[0])
-        return people
-
     def _smooth(self, values):
         n = len(values)
         window = min(self.window, n if n % 2 else n - 1)
@@ -89,90 +78,79 @@ class PositionSmoother:
         velocity = savgol_filter(values, window, self.polyorder, deriv=1, axis=0) * self.fps
         return smooth, velocity
 
-    def smooth(self, tracks):
-        """Acrescenta as posições suavizadas a `tracks` (altera no lugar)."""
-        n_frames = len(tracks["players"])
-        tracks["estimated"] = [{} for _ in range(n_frames)]
+    def smooth(self, game):
+        """Suaviza a ficha (PlayerTrack) de cada pessoa do jogo (altera no lugar)."""
+        for player in game.players.values():
+            self.smooth_player(player)
+        return game
+
+    def smooth_player(self, player):
+        """Preenche x, y, speed, speed_reliable e quality de uma ficha e
+        acrescenta os frames estimados (ausências entre medições)."""
         max_gap = None if self.max_gap_s is None else int(self.max_gap_s * self.fps)
+        calibrated = np.flatnonzero(~np.isnan(player.x_raw))
+        if len(calibrated) == 0:
+            return player
+        frames = player.frames[calibrated]
+        points = np.column_stack([player.x_raw[calibrated], player.y_raw[calibrated]])
+        track_ids = player.track_ids[calibrated]
+        quality = np.array([BORDER if touches_border(b, self.frame_size) else MEASURED
+                            for b in player.bbox[calibrated]], dtype=object)
 
-        for gid, items in self._trajectories(tracks).items():
-            frames, points, quality, track_ids = [], [], [], []
-            for frame_num, _, track_id, person in items:
-                if person.get("position_m") is None:
-                    continue
-                q = "border" if touches_border(person["bbox"], self.frame_size) else "measured"
-                frames.append(frame_num)
-                points.append(person["position_m"])
-                quality.append(q)
-                track_ids.append(track_id)
-            if not frames:
-                continue
-            frames = np.array(frames)
-            points = np.array(points, dtype=float)
-            quality = np.array(quality, dtype=object)
-            track_ids = np.array(track_ids)
+        # Uma track (do ByteTrack) só com caixas na borda: usá-las na mesma.
+        # O erro (~meia largura da caixa) é menor do que não ter nada, e
+        # sem elas uma ausência ligada pelo ReID ficava sem ponto de partida.
+        for track_id in np.unique(track_ids):
+            mine = track_ids == track_id
+            if not (quality[mine] == MEASURED).any():
+                quality[mine] = MEASURED
 
-            # Uma track (do ByteTrack) só com caixas na borda: usá-las na mesma.
-            # O erro (~meia largura da caixa) é menor do que não ter nada, e
-            # sem elas uma ausência ligada pelo ReID ficava sem ponto de partida.
-            for track_id in np.unique(track_ids):
-                mine = track_ids == track_id
-                if not (quality[mine] == "measured").any():
-                    quality[mine] = "measured"
+        good = quality == MEASURED
+        if good.sum() >= 3:
+            bad = hampel_outliers(frames[good], points[good], self.hampel_half,
+                                  self.hampel_min_m)
+            idx = np.flatnonzero(good)[bad]
+            quality[idx] = OUTLIER
+            good[idx] = False
+        self.outliers += int((quality == OUTLIER).sum())
+        self.border += int((quality == BORDER).sum())
+        if not good.any():
+            good = np.ones(len(frames), dtype=bool)   # sem alternativa
+        player.quality[calibrated] = quality
 
-            good = quality == "measured"
-            if good.sum() >= 3:
-                bad = hampel_outliers(frames[good], points[good], self.hampel_half,
-                                      self.hampel_min_m)
-                idx = np.flatnonzero(good)[bad]
-                quality[idx] = "outlier"
-                good[idx] = False
-            self.outliers += int((quality == "outlier").sum())
-            self.border += int((quality == "border").sum())
-            if not good.any():
-                good = np.ones(len(frames), dtype=bool)   # sem alternativa
+        # Trajetória contínua: linha reta entre medições válidas.
+        full = np.arange(frames[good][0], frames[good][-1] + 1)
+        filled = np.column_stack([
+            np.interp(full, frames[good], points[good, k]) for k in (0, 1)])
+        smooth, velocity = self._smooth(filled)
+        speed = np.linalg.norm(velocity, axis=1)
+        edge = self.window // 2
+        reliable = (np.arange(len(full)) >= edge) & (np.arange(len(full)) < len(full) - edge)
 
-            # Trajetória contínua: linha reta entre medições válidas.
-            full = np.arange(frames[good][0], frames[good][-1] + 1)
-            filled = np.column_stack([
-                np.interp(full, frames[good], points[good, k]) for k in (0, 1)])
-            smooth, velocity = self._smooth(filled)
-            speed = np.linalg.norm(velocity, axis=1)
+        # Frames medidos dentro do intervalo suavizado.
+        inside = np.flatnonzero((player.frames >= full[0]) & (player.frames <= full[-1])
+                                & (player.quality != UNCALIBRATED))
+        k = player.frames[inside] - full[0]
+        player.x[inside], player.y[inside] = smooth[k, 0], smooth[k, 1]
+        player.speed[inside] = speed[k]
+        player.speed_reliable[inside] = reliable[k]
 
-            seen = {}
-            for (frame_num, category, track_id, person), q in zip(
-                    [it for it in items if it[3].get("position_m") is not None], quality):
-                seen[frame_num] = person
-                person["position_quality"] = q
-            edge = self.window // 2
-            for k, frame_num in enumerate(full):
-                if frame_num in seen:
-                    person = seen[frame_num]
-                    person["position_smooth"] = smooth[k].tolist()
-                    person["speed_ms"] = float(speed[k])
-                    person["speed_reliable"] = edge <= k < len(full) - edge
-            # Ausências (frames sem a pessoa entre a 1.ª e a última medição).
-            present = {it[0] for it in items}
-            missing = [k for k, f in enumerate(full) if f not in present]
-            if not missing:
-                continue
-            reference = items[0][3]
-            gaps = self._gap_lengths(full, present)
-            for k in missing:
-                if max_gap is not None and gaps[k] > max_gap:
-                    continue
-                tracks["estimated"][full[k]][gid] = {
-                    "global_id": gid,
-                    "position_smooth": smooth[k].tolist(),
-                    "speed_ms": float(speed[k]),
-                    "team": reference.get("team"),
-                    "role": reference.get("role"),
-                    "team_color": reference.get("team_color"),
-                    "estimated": True,
-                    "gap_frames": int(gaps[k]),
-                }
-                self.estimated += 1
-        return tracks
+        # Ausências (frames sem a pessoa entre a 1.ª e a última medição).
+        present = set(player.frames.tolist())
+        missing = np.array([i for i, f in enumerate(full) if f not in present], dtype=int)
+        if len(missing) == 0:
+            return player
+        gaps = self._gap_lengths(full, present)
+        if max_gap is not None:
+            missing = missing[gaps[missing] <= max_gap]
+        if len(missing) == 0:
+            return player
+        player.add_frames(
+            full[missing], x=smooth[missing, 0], y=smooth[missing, 1],
+            speed=speed[missing], quality=ESTIMATED,
+            order=ESTIMATED_ORDER + player.global_id)
+        self.estimated += len(missing)
+        return player
 
     @staticmethod
     def _gap_lengths(full, present):

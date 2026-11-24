@@ -17,6 +17,8 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
 - `reid/`: reidentificação (`global_id`) por equipa, tempo e posição em metros.
 - `ball/`: limpeza e interpolação da bola, posse de bola e painel.
 - `positions/`: estabilização da homografia e suavização das trajetórias.
+- `game/`: `PlayerTrack` (ficha por pessoa, arrays por frame) e `Game`
+  (fichas + posse/ball_holder por frame, `positions_at`, `to_csv`).
 - `tests/`: testes sintéticos do ReID e da bola (`python -m pytest tests/`).
 - `homografia/`: calibração (`homografia.py`), geometria do campo 120×70 m
   (`football_pitch.py`), minimapa (`minimap.py`).
@@ -68,6 +70,14 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   ausências ligadas; Savitzky–Golay 1 s grau 2 → position_smooth/speed_ms.
   speed_reliable=False nas pontas (derivada extrapolada). Posições estimadas
   em tracks["estimated"]: minimapa (círculo vazio) sim, estatísticas NÃO.
+- **Estrutura por pessoa** (pedida pelo Vasco): até ao ReID tudo fica em
+  `tracks` (por frame, como o tracking produz). Logo a seguir,
+  `Game.from_tracks` cria uma `PlayerTrack` por global_id e
+  tracks["players"/"referees"] passam a None. Suavização, posse, desenho e CSV
+  usam só o `Game`. Fixo (equipa, papel, cor) uma vez por ficha; posse e
+  ball_holder só no Game (sem `has_ball` guardado). Estimados são frames da
+  própria ficha (quality="estimated"); `order` guarda a ordem de deteção no
+  frame para o desenho sair igual. A bola continua em tracks["ball"].
 - Cores no desenho: cor real da camisola da equipa; árbitros a amarelo;
   sem equipa a cinzento.
 
@@ -111,6 +121,10 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   equipas+ReID+bola+posições (incl. estabilização e suavização) 2,2 s.
   O Vasco reportou 1 min → 10 min depois da suavização; aqui as etapas
   novas custam ~2,6 s. À espera do relatório de tempos do PC dele.
+- Feito: `Game`/`PlayerTrack`. Comparado com a versão anterior no vídeo de
+  teste: 18 217 posições/velocidades, posse e ball_holder IGUAIS e vídeo igual
+  píxel a píxel nos 750 frames. Funções novas ~1,2 s/30 s. CSV 1,4 MB/30 s.
+  (Retrato para comparar versões: scratchpad/snapshot.py, se ainda existir.)
 - Por fazer / ideias:
   - Acelerar a homografia: ajustar a matriz anterior com o movimento da
     câmara (já calculado em camera_moved) e só recalibrar com o modelo em
@@ -154,3 +168,5 @@ metros → vídeo anotado com minimapa. Documentação detalhada no `README.md`
   para um jogo completo (limite de 10 s, cortes de câmara, escala das tracks).
 - 2026-11-23: `positions/` (estabilização da homografia e suavização, com a
   ideia do Vasco de remover saltos e ligar ausências em linha reta).
+  Medição de tempos por etapa no `main.py`. PR VascoCMH/Fut#3 (integrado).
+- 2026-11-24: estrutura por pessoa (`game/`), exportação CSV.

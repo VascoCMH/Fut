@@ -19,9 +19,11 @@ from team_assigner import TeamAssigner
 from reid import ReIdentifier, summarize
 from ball import BallTracker, PossessionAssigner, draw_possession
 from positions import HomographyStabilizer, PositionSmoother
+from game import Game
 
 VIDEO_PATH = "input_videos/inputvideo.mp4"
 OUTPUT_PATH = "output_videos/outputvideo.mp4"
+CSV_PATH = "output_videos/posicoes.csv"
 BATCH_SIZE = 32
 timings = Timings()
 
@@ -100,9 +102,14 @@ def main():
     reidentifier.assign(tracks)
     print("\n".join(summarize(reidentifier)))
 
+    ##JOGO (uma ficha por pessoa, com a trajetória toda; deixa de se usar
+    ##tracks["players"] e tracks["referees"], que ocupam muita memória)###
+    game = Game.from_tracks(tracks, fps)
+    tracks["players"] = tracks["referees"] = None
+
     ##SUAVIZAÇÃO (remove saltos, suaviza e estima as ausências em linha reta)###
     smoother = PositionSmoother(fps=fps, frame_size=frame_size)
-    smoother.smooth(tracks)
+    smoother.smooth(game)
     print(f"Posições: {smoother.outliers} saltos e {smoother.border} caixas "
           f"cortadas pela borda descartados; {smoother.estimated} posições "
           f"estimadas em ausências")
@@ -113,11 +120,13 @@ def main():
           f"{ball_tracker.recovered} recuperados, "
           f"{ball_tracker.interpolated} posições interpoladas")
     possession = PossessionAssigner()
-    possession.assign(tracks)
+    possession.assign(game, tracks["ball"])
     stats = possession.statistics()
     print(f"Posse: equipa 0 {stats[0]:.0f}% | equipa 1 {stats[1]:.0f}% | "
           f"disputada {stats['disputed']:.0f}%")
 
+    game.to_csv(CSV_PATH)
+    print(f"Posições guardadas em {CSV_PATH}")
     timings.stop("Equipas, ReID, bola, posições")
 
     ##DESENHO (passagem 2: lê, desenha e escreve frame a frame)###
@@ -128,22 +137,19 @@ def main():
     minimap = PitchMinimap(homography.pitch)
     counts = Counter()
     for frame_index, frame in enumerate(iter_frames(VIDEO_PATH)):
-        if frame_index >= len(tracks["players"]):
+        if frame_index >= game.n_frames:
             break
-        tracker.draw_frame(frame, frame_index, tracks)
-        people = [
-            (person.get("global_id", track_id),
-             person.get("position_smooth") or person["position_m"],
-             person.get("team_color", (0, 220, 255)), False)
-            for category in ("players", "referees")
-            for track_id, person in tracks[category][frame_index].items()
-            if person["position_m"] is not None
-        ]
-        people += [
-            (gid, person["position_smooth"], person.get("team_color"), True)
-            for gid, person in tracks["estimated"][frame_index].items()
-        ]
-        minimap.overlay(frame, people, matrices[frame_index] is not None)
+        people = game.positions_at(frame_index)
+        tracker.draw_frame(frame, people, tracks["ball"][frame_index])
+        points = []
+        for person in people:
+            if person.estimated:
+                points.append((person.global_id, person.position, person.color, True))
+            elif person.position_raw is not None:
+                points.append((person.global_id, person.position or person.position_raw,
+                               person.color if person.color is not None else (0, 220, 255),
+                               False))
+        minimap.overlay(frame, points, matrices[frame_index] is not None)
         current = possession.possession[frame_index]
         if current is not None:
             counts[current] += 1
@@ -154,7 +160,7 @@ def main():
     writer.release()
     timings.stop("Desenho e escrita do vídeo")
     print(f"Vídeo guardado em {OUTPUT_PATH}")
-    print(timings.report(video_seconds=len(tracks["players"]) / fps if fps else None))
+    print(timings.report(video_seconds=game.n_frames / fps if fps else None))
 
 
 if __name__ == "__main__":

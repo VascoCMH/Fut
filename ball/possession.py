@@ -4,7 +4,8 @@ Por frame (estado "bruto"), com a distância dos pés de cada jogador à bola:
 - ninguém a menos de `control_radius_m`  -> "livre" (bola em passe/remate);
 - jogadores das duas equipas dentro do raio e com distâncias parecidas
   (diferença < `dispute_margin_m`)       -> "disputada";
-- caso contrário                          -> equipa do jogador mais próximo.
+- caso contrário                          -> equipa do jogador mais próximo
+                                             (game.ball_holder = global_id dele).
 
 Posse final (suavizada):
 - "livre" mantém a posse anterior: num passe, a bola continua da equipa que
@@ -38,15 +39,15 @@ class PossessionAssigner:
         self.min_frames = min_frames
         self.raw = []          # estado bruto por frame
         self.possession = []   # posse suavizada por frame
-        self.possessor = []    # track_id do jogador com a bola (ou None)
+        self.possessor = []    # global_id do jogador com a bola (ou None)
 
     @staticmethod
     def _distance(ball, player):
-        """Distância (m) entre a bola e os pés do jogador."""
-        if ball.get("position_m") is not None and player.get("position_m") is not None:
+        """Distância (m) entre a bola e os pés do jogador (PersonState)."""
+        if ball.get("position_m") is not None and player.position_raw is not None:
             return float(np.linalg.norm(
-                np.asarray(ball["position_m"]) - np.asarray(player["position_m"])))
-        x1, y1, x2, y2 = player["bbox"]
+                np.asarray(ball["position_m"]) - np.asarray(player.position_raw)))
+        x1, y1, x2, y2 = player.bbox
         feet = np.array([(x1 + x2) / 2, y2])
         bx1, _, bx2, by2 = ball["bbox"]
         ball_px = np.array([(bx1 + bx2) / 2, by2])
@@ -54,19 +55,21 @@ class PossessionAssigner:
         return float(np.linalg.norm(feet - ball_px) / px_per_m)
 
     def frame_state(self, ball, players):
-        """(estado bruto, track_id do mais próximo) de um frame."""
+        """(estado bruto, global_id do mais próximo) de um frame.
+
+        players: lista de PersonState medidas nesse frame."""
         if ball is None:
             return None, None
         if ball.get("interpolated") and ball.get("gap_frames", 0) > self.max_trusted_gap:
             return FREE, None
-        nearest = {}  # equipa -> (distância, track_id)
-        for track_id, player in players.items():
-            team = player.get("team")
+        nearest = {}  # equipa -> (distância, global_id)
+        for player in players:
+            team = player.team
             if team not in (0, 1):
                 continue
             d = self._distance(ball, player)
             if team not in nearest or d < nearest[team][0]:
-                nearest[team] = (d, track_id)
+                nearest[team] = (d, player.global_id)
         close = {t: v for t, v in nearest.items() if v[0] <= self.control_radius_m}
         if not close:
             return FREE, None
@@ -75,13 +78,16 @@ class PossessionAssigner:
         team = min(close, key=lambda t: close[t][0])
         return team, close[team][1]
 
-    def assign(self, tracks):
-        """Calcula a posse de todos os frames. Acrescenta `possession` à bola
-        e `has_ball=True` ao jogador com a bola. Devolve a lista de posse."""
+    def assign(self, game, ball_tracks):
+        """Calcula a posse de todos os frames e guarda-a no jogo
+        (game.possession e game.ball_holder, por frame). Acrescenta também
+        `possession` à bola. Devolve a lista de posse."""
         self.raw, self.possession, self.possessor = [], [], []
         current, candidate, streak = None, None, 0
-        for frame_num, players in enumerate(tracks["players"]):
-            ball = tracks["ball"][frame_num].get(1)
+        for frame_num in range(game.n_frames):
+            players = [p for p in game.positions_at(frame_num)
+                       if not p.estimated and p.role != "referee"]
+            ball = ball_tracks[frame_num].get(1)
             state, holder = self.frame_state(ball, players)
             self.raw.append(state)
 
@@ -103,8 +109,8 @@ class PossessionAssigner:
             self.possessor.append(holder)
             if ball is not None:
                 ball["possession"] = current
-            if holder is not None:
-                players[holder]["has_ball"] = True
+        game.possession = list(self.possession)
+        game.ball_holder = list(self.possessor)
         return self.possession
 
     def statistics(self):
